@@ -8,7 +8,7 @@ from datetime import date
 st.set_page_config(page_title="住院醫師排班系統", layout="wide")
 
 st.title("🏥 台灣住院醫師排班系統")
-st.caption("v1.6 更新版：更新預設醫師名單 | 過勞保護 + 公平分配")
+st.caption("v1.7 更新版：指定值班功能 + 預假無上限 | 過勞保護 + 公平分配")
 
 # --- 2. 側邊欄設定 ---
 st.sidebar.header("設定參數")
@@ -20,26 +20,39 @@ days_in_month = calendar.monthrange(year, month)[1]
 dates = [d for d in range(1, days_in_month + 1)]
 
 st.sidebar.subheader("醫師名單")
-# === 這裡更新了名字 ===
 default_doctors = "洋洋(R3), 蹦蹦(R2), 小白(R1), 跑跑(R1), 跳跳(NP)"
 doc_input = st.sidebar.text_area("用逗號分隔", default_doctors)
 doctors = [x.strip() for x in doc_input.split(",") if x.strip()]
 
 st.sidebar.markdown("---")
-st.sidebar.header("預假設定")
+st.sidebar.header("排班許願池")
 
+# 初始化字典
 leave_requests = {}
+duty_requests = {}
 
 if doctors:
-    with st.sidebar.expander("點擊展開填寫預假", expanded=True):
+    # 區域 1: 不想值班 (預假) - 無上限
+    with st.sidebar.expander("🚫 不想值班 (預假)", expanded=True):
+        st.caption("請勾選「絕對不能排班」的日子 (無天數限制)")
         for doc in doctors:
             leaves = st.multiselect(
-                f"{doc} 預假日期",
+                f"{doc} 預假",
                 options=dates,
-                max_selections=3,
                 key=f"leave_{doc}"
             )
             leave_requests[doc] = leaves
+
+    # 區域 2: 指定值班 (預排) - 新功能
+    with st.sidebar.expander("✅ 指定值班 (預排)", expanded=False):
+        st.caption("請勾選「一定要排班」的日子 (請勿兩人選同一天)")
+        for doc in doctors:
+            duties = st.multiselect(
+                f"{doc} 指定值班",
+                options=dates,
+                key=f"duty_{doc}"
+            )
+            duty_requests[doc] = duties
 else:
     st.sidebar.warning("請先輸入醫師名單")
 
@@ -86,7 +99,7 @@ def get_calendar_html(year, month, schedule_map):
     return html_content
 
 # --- 4. 核心函式：排班演算法 ---
-def solve_schedule(doctors, days_in_month, leave_requests):
+def solve_schedule(doctors, days_in_month, leave_requests, duty_requests):
     model = cp_model.CpModel()
     shifts = {}
 
@@ -104,10 +117,17 @@ def solve_schedule(doctors, days_in_month, leave_requests):
         for day in range(1, days_in_month):
             model.Add(shifts[(doc, day)] + shifts[(doc, day + 1)] <= 1)
 
-    # 預假限制
+    # === [v1.7 新增] 處理預假與指定值班 ===
+    
+    # 1. 預假 (不想值班) -> 設定為 0
     for doc, days_off in leave_requests.items():
         for day in days_off:
             model.Add(shifts[(doc, day)] == 0)
+
+    # 2. 指定值班 (一定要值班) -> 設定為 1
+    for doc, days_on in duty_requests.items():
+        for day in days_on:
+            model.Add(shifts[(doc, day)] == 1)
 
     # 過勞保護：7天內最多3班
     max_shifts_per_week = 3
@@ -161,8 +181,13 @@ def solve_schedule(doctors, days_in_month, leave_requests):
         
         return pd.DataFrame(results), doctor_stats, schedule_map
     else:
-        st.error("排班失敗！限制太嚴格或人力不足。")
-        st.info("建議：減少預假天數，或增加人力。")
+        st.error("排班失敗！限制衝突或無法滿足。")
+        st.warning("""
+        **常見失敗原因：**
+        1. **指定衝突**：兩個人指定了同一天值班。
+        2. **連續衝突**：指定某人連續兩天值班 (違反勞基法)。
+        3. **預假過多**：剩下的醫生人數不足以覆蓋當日值班。
+        """)
         return None, None, None
 
 # --- 5. 主程式執行區 ---
@@ -178,15 +203,18 @@ if run_btn:
         st.warning("請先輸入醫師名單")
     else:
         with st.spinner("運算中..."):
-            df_schedule, stats, schedule_map = solve_schedule(doctors, days_in_month, leave_requests)
+            # 這裡傳入多了 duty_requests
+            df_schedule, stats, schedule_map = solve_schedule(doctors, days_in_month, leave_requests, duty_requests)
         
         if df_schedule is not None:
+            # 顯示日曆
             st.subheader(f"📅 {year}年{month}月 排班月曆")
             cal_html = get_calendar_html(year, month, schedule_map)
             st.markdown(cal_html, unsafe_allow_html=True)
 
             st.markdown("---")
             
+            # 顯示表格與統計
             col_a, col_b = st.columns([2, 1])
             with col_a:
                 st.subheader("詳細清單")
@@ -196,6 +224,7 @@ if run_btn:
                 stats_df = pd.DataFrame.from_dict(stats, orient='index')
                 st.dataframe(stats_df, use_container_width=True)
             
+            # 下載按鈕
             csv = df_schedule.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
                 "📥 下載 CSV",
