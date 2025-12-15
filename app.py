@@ -17,7 +17,7 @@ days_in_month = calendar.monthrange(year, month)[1]
 dates = [d for d in range(1, days_in_month + 1)]
 
 st.sidebar.subheader("醫師名單")
-default_doctors = "跳跳(R3), 蹦蹦(R2), 跑跑(R1), 小白(R1), 洋洋(NP)"
+default_doctors = "繃繃(R3), 跳跳(R2), 小白(R1), 洋洋(R1), 跑跑(NP)"
 doc_input = st.sidebar.text_area("用逗號分隔", default_doctors)
 doctors = [x.strip() for x in doc_input.split(",") if x.strip()]
 
@@ -38,6 +38,46 @@ if doctors:
             leave_requests[doc] = leaves
 else:
     st.sidebar.warning("請先輸入醫師名單")
+
+def get_calendar_html(year, month, schedule_map):
+    cal = calendar.monthcalendar(year, month)
+    html = """
+    <style>
+        .calendar-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+        .calendar-table th { background-color: #f0f2f6; padding: 8px; border: 1px solid #ddd; text-align: center; color: #333; }
+        .calendar-table td { height: 100px; vertical-align: top; padding: 5px; border: 1px solid #ddd; width: 14.28%; background-color: white; }
+        .day-number { font-size: 12px; color: #666; margin-bottom: 5px; text-align: right; }
+        .doc-badge { background-color: #e8f0fe; color: #1557b0; padding: 4px; border-radius: 4px; font-size: 14px; font-weight: bold; text-align: center; display: block; }
+        .weekend-td { background-color: #fafafa !important; }
+        .empty-td { background-color: #f9f9f9; }
+    </style>
+    <table class="calendar-table">
+        <thead>
+            <tr>
+                <th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th><th>Sun</th>
+            </tr>
+        </thead>
+        <tbody>
+    """
+    
+    for week in cal:
+        html += "<tr>"
+        for i, day in enumerate(week):
+            is_weekend = i >= 5
+            td_class = "weekend-td" if is_weekend else ""
+            
+            if day == 0:
+                html += f'<td class="empty-td"></td>'
+            else:
+                doc = schedule_map.get(day, "")
+                html += f'<td class="{td_class}"><div class="day-number">{day}</div>'
+                if doc:
+                    html += f'<div class="doc-badge">{doc}</div>'
+                html += '</td>'
+        html += "</tr>"
+    
+    html += "</tbody></table>"
+    return html
 
 def solve_schedule(doctors, days_in_month, leave_requests):
     model = cp_model.CpModel()
@@ -66,6 +106,8 @@ def solve_schedule(doctors, days_in_month, leave_requests):
     status = solver.Solve(model)
 
     results = []
+    schedule_map = {}
+
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
         st.success(f"排班成功！ (Status: {solver.StatusName(status)})")
         
@@ -84,11 +126,12 @@ def solve_schedule(doctors, days_in_month, leave_requests):
                         "備註": is_weekend
                     })
                     doctor_shift_counts[doc] += 1
+                    schedule_map[day] = doc
         
-        return pd.DataFrame(results), doctor_shift_counts
+        return pd.DataFrame(results), doctor_shift_counts, schedule_map
     else:
         st.error("排班失敗，請檢查人力或預假衝突。")
-        return None, None
+        return None, None, None
 
 st.markdown("---")
 col1, col2 = st.columns([1, 4])
@@ -100,14 +143,22 @@ if run_btn:
         st.warning("請先輸入醫師名單")
     else:
         with st.spinner("運算中..."):
-            df_schedule, stats = solve_schedule(doctors, days_in_month, leave_requests)
+            df_schedule, stats, schedule_map = solve_schedule(doctors, days_in_month, leave_requests)
         
         if df_schedule is not None:
-            st.subheader("班數統計")
-            st.bar_chart(pd.Series(stats))
+            st.subheader(f"📅 {year}年{month}月 排班月曆")
+            cal_html = get_calendar_html(year, month, schedule_map)
+            st.markdown(cal_html, unsafe_allow_html=True)
+
+            st.markdown("---")
             
-            st.subheader(f"{year}年{month}月 值班表")
-            st.dataframe(df_schedule, use_container_width=True)
+            col_a, col_b = st.columns([2, 1])
+            with col_a:
+                st.subheader("詳細清單")
+                st.dataframe(df_schedule, use_container_width=True)
+            with col_b:
+                st.subheader("班數統計")
+                st.bar_chart(pd.Series(stats))
             
             csv = df_schedule.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
