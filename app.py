@@ -7,10 +7,10 @@ import json
 import hashlib
 
 # --- 1. Page Configuration ---
-st.set_page_config(page_title="產房/小班 雙軌排班系統 (意願優先版)", layout="wide")
+st.set_page_config(page_title="產房/小班 雙軌排班系統 (R救援版)", layout="wide")
 
-st.title("🏥 婦產科雙軌排班系統 (v4.3 意願優先版)")
-st.caption("調整邏輯：不想值班 (No-Go) > 點數上限 (<=8) | 寧可點數超標，也要避開不想值的日子")
+st.title("🏥 婦產科雙軌排班系統 (v4.4 R救援版)")
+st.caption("新功能：若 PGY/Int 點數 > 8，住院醫師 (R) 自動支援 | 嚴格遵守 R 的間隔與意願保護")
 
 # --- 2. Session State Management ---
 default_state = {
@@ -86,7 +86,7 @@ def update_pref(key, staff, label, help_t):
 
 # Absolute Leaves
 with st.expander("⛔️ 請假/未到職設定 (絕對排除)", expanded=True):
-    st.error("注意：此區設定為「硬限制」，系統絕對不會排班。適用於婚喪假、出國、未到職。")
+    st.error("注意：此區為硬限制，系統絕對不會排班。")
     col_l, col_r = st.columns(2)
     with col_l:
         update_pref("vs_leaves", vs_staff, "VS 請假", "")
@@ -101,16 +101,16 @@ c1, c2 = st.columns(2)
 with c1:
     with st.expander("🔴 大班意願", expanded=False):
         update_pref("vs_wishes", vs_staff, "VS 指定值班", "優先排入")
-        update_pref("vs_nogo", vs_staff, "VS 不想值", "權重極高，優先避開")
+        update_pref("vs_nogo", vs_staff, "VS 不想值", "盡量避開")
         st.markdown("---")
-        update_pref("r_nogo", r_staff, "R 不想值", "權重極高，優先避開")
+        update_pref("r_nogo", r_staff, "R 不想值", "盡量避開")
         update_pref("r_wishes", r_staff, "R 想值", "額外加分")
 with c2:
     with st.expander("🔵 小班意願", expanded=False):
-        update_pref("pgy_nogo", pgy_staff, "PGY 不想值", "權重極高，優先避開")
+        update_pref("pgy_nogo", pgy_staff, "PGY 不想值", "盡量避開")
         update_pref("pgy_wishes", pgy_staff, "PGY 想值", "額外加分")
         st.markdown("---")
-        update_pref("int_nogo", int_staff, "Int 不想值", "權重極高，優先避開")
+        update_pref("int_nogo", int_staff, "Int 不想值", "盡量避開")
         update_pref("int_wishes", int_staff, "Int 想值", "額外加分")
 
 # --- 5. Core Algorithms ---
@@ -138,12 +138,7 @@ def add_fairness_objective(model, shifts, staff_list, days, obj_terms, weight=50
         model.Add(dev_we >= avg_we - we_count)
         obj_terms.append(dev_we * -weight)
 
-def add_point_system_constraint(model, shifts, staff_list, days, obj_terms, sacrifices, limit=8, weight=200):
-    """
-    Weighted Point System.
-    Weight lowered to 200 (Lower priority than No-Go which is 5000).
-    It allows points to exceed 8 if necessary to satisfy No-Go preferences.
-    """
+def add_point_system_constraint(model, shifts, staff_list, days, obj_terms, sacrifices, limit=8, weight=1000):
     weekend_days = [d for d in days if date(year, month, d).weekday() >= 5]
     weekday_days = [d for d in days if date(year, month, d).weekday() < 5]
 
@@ -154,7 +149,7 @@ def add_point_system_constraint(model, shifts, staff_list, days, obj_terms, sacr
         slack = model.NewIntVar(0, 50, f"slack_pts_{doc}")
         model.Add(total_points <= limit + slack)
         
-        # Low weight penalty -> Sacrificed first
+        # Penalize exceeding the limit
         obj_terms.append(slack * -weight)
         sacrifices.append((slack, f"{doc} 點數超標 (>{limit}點)"))
 
@@ -176,16 +171,12 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
         for d in days:
             shifts[(doc, d)] = model.NewBoolVar(f"s_big_{doc}_{d}")
 
-    # 1. Coverage
+    # Coverage & Hard Constraints
     for d in days:
         model.Add(sum(shifts[(doc, d)] for doc in all_staff) == 1)
-
-    # 2. Hard Constraint: No back-to-back
     for doc in all_staff:
         for d in range(1, len(days)):
              model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
-
-    # 3. Absolute Leaves
     for doc, dates_off in vs_leaves.items():
         if doc in vs_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
@@ -193,59 +184,46 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
         if doc in r_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
 
-    # 4. Diversity
     if forbidden_patterns:
         for pattern in forbidden_patterns:
             model.Add(sum([shifts[(doc, d)] for doc, d in pattern]) <= len(pattern) - 3)
 
-    # 5. VS Wishes
+    # VS Wishes
     for doc, dates_on in vs_wishes.items():
         if doc in vs_staff:
-            for d in dates_on:
-                model.Add(shifts[(doc, d)] == 1) 
+            for d in dates_on: model.Add(shifts[(doc, d)] == 1) 
     
-    # 6. Objectives (Weights Adjusted)
+    # Objectives
+    add_fairness_objective(model, shifts, r_staff, days, obj_terms, weight=2000)
     
-    # Fairness (Medium Priority)
-    W_FAIRNESS = 2000
-    add_fairness_objective(model, shifts, r_staff, days, obj_terms, weight=W_FAIRNESS)
-    
-    # Point Limit (Lower Priority - Sacrificed to save No-Go)
-    W_POINT_LIMIT = 200
-    add_point_system_constraint(model, shifts, r_staff, days, obj_terms, sacrifices, limit=8, weight=W_POINT_LIMIT)
+    # Point Limit Weight = 200 (Lower than No-Go)
+    add_point_system_constraint(model, shifts, r_staff, days, obj_terms, sacrifices, limit=8, weight=200)
+    add_spacing_preference(model, shifts, r_staff, days, obj_terms, weight=50)
 
-    # Q3 Spacing (Lowest Priority)
-    W_SPACING = 50
-    add_spacing_preference(model, shifts, r_staff, days, obj_terms, weight=W_SPACING)
-
-    # 7. Preferences (High Priority for No-Go)
-    W_NOGO = 5000       # High Penalty: Avoid No-Go at all costs
-    W_VS_SUPPORT = 5000 # High Penalty: Don't use VS for support unless desperate
-    W_R_WISH = 10
-    
+    # Preferences
     for doc, dates_off in r_nogo.items():
         if doc in r_staff:
             for d in dates_off:
-                obj_terms.append(shifts[(doc, d)] * -W_NOGO)
+                obj_terms.append(shifts[(doc, d)] * -5000)
                 sacrifices.append((shifts[(doc, d)], f"{doc} (R) 排入 No-Go ({month}/{d})"))
     
     for doc, dates_off in vs_nogo.items():
         if doc in vs_staff:
             for d in dates_off:
-                obj_terms.append(shifts[(doc, d)] * -W_NOGO)
+                obj_terms.append(shifts[(doc, d)] * -5000)
                 sacrifices.append((shifts[(doc, d)], f"{doc} (VS) 排入 No-Go ({month}/{d})"))
 
     for doc in vs_staff:
         wished_days = vs_wishes.get(doc, [])
         for d in days:
             if d not in wished_days:
-                obj_terms.append(shifts[(doc, d)] * -W_VS_SUPPORT)
+                obj_terms.append(shifts[(doc, d)] * -5000)
                 sacrifices.append((shifts[(doc, d)], f"{doc} (VS) 支援非指定班 ({month}/{d})"))
 
     for doc, dates_on in r_wishes.items():
         if doc in r_staff:
             for d in dates_on:
-                obj_terms.append(shifts[(doc, d)] * W_R_WISH)
+                obj_terms.append(shifts[(doc, d)] * 10)
 
     model.Maximize(sum(obj_terms))
     solver = cp_model.CpSolver()
@@ -253,35 +231,82 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
     status = solver.Solve(model)
     
     result_pattern = []
+    r_schedule_map = {r: [] for r in r_staff} # To store Big Shift dates for each R
+
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         for doc in all_staff:
             for d in days:
                 if solver.Value(shifts[(doc, d)]) == 1:
                     result_pattern.append((doc, d))
+                    if doc in r_staff:
+                        r_schedule_map[doc].append(d)
 
-    return solver, status, shifts, sacrifices, result_pattern
+    return solver, status, shifts, sacrifices, result_pattern, r_schedule_map
 
-def solve_small_shift(pgy_staff, int_staff, days, pgy_leaves, int_leaves, pgy_nogo, pgy_wishes, int_nogo, int_wishes, forbidden_patterns=None):
+def solve_small_shift(pgy_staff, int_staff, r_staff, days, 
+                      pgy_leaves, int_leaves, 
+                      pgy_nogo, pgy_wishes, int_nogo, int_wishes,
+                      r_nogo, r_schedule_map, # New inputs for R support logic
+                      forbidden_patterns=None):
+    
     model = cp_model.CpModel()
-    all_staff = pgy_staff + int_staff
+    
+    # Staff pool now includes R for support
+    # We treat R separately because they have different constraints
     shifts = {}
     obj_terms = []
     sacrifices = []
 
-    for doc in all_staff:
+    # 1. PGY/Intern Variables
+    for doc in pgy_staff + int_staff:
         for d in days:
             shifts[(doc, d)] = model.NewBoolVar(f"s_sml_{doc}_{d}")
 
-    # 1. Coverage
+    # 2. R Support Variables
+    for doc in r_staff:
+        for d in days:
+            shifts[(doc, d)] = model.NewBoolVar(f"s_sml_Rsupport_{doc}_{d}")
+
+    all_small_candidates = pgy_staff + int_staff + r_staff
+
+    # 3. Coverage (Exactly 1 person, can be PGY, Int, or R)
     for d in days:
-        model.Add(sum(shifts[(doc, d)] for doc in all_staff) == 1)
+        model.Add(sum(shifts[(doc, d)] for doc in all_small_candidates) == 1)
     
-    # 2. No Back-to-Back
-    for doc in all_staff:
+    # 4. No Back-to-Back (for PGY/Int)
+    for doc in pgy_staff + int_staff:
         for d in range(1, len(days)):
              model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
 
-    # 3. Absolute Leaves
+    # 5. R Support Constraints (The 3 Golden Rules)
+    for doc in r_staff:
+        big_shift_days = r_schedule_map.get(doc, [])
+        r_nogo_days = r_nogo.get(doc, [])
+        
+        for d in days:
+            # Rule 1: No simultaneous shifts
+            if d in big_shift_days:
+                model.Add(shifts[(doc, d)] == 0)
+            
+            # Rule 2: No spacing violation (Strict Q3 relative to Big Shift)
+            # Check if d is too close to any Big Shift day (d-2, d-1, d+1, d+2)
+            is_too_close = False
+            for b_day in big_shift_days:
+                if abs(b_day - d) <= 2: 
+                    is_too_close = True
+                    break
+            if is_too_close:
+                model.Add(shifts[(doc, d)] == 0)
+
+            # Rule 3: No No-Go violation for support
+            if d in r_nogo_days:
+                model.Add(shifts[(doc, d)] == 0)
+            
+            # Rule 4 (Implicit): R shouldn't work back-to-back Small Shifts either
+            if d < len(days):
+                model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
+
+    # 6. Absolute Leaves (PGY/Int)
     for doc, dates_off in pgy_leaves.items():
         if doc in pgy_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
@@ -289,20 +314,25 @@ def solve_small_shift(pgy_staff, int_staff, days, pgy_leaves, int_leaves, pgy_no
         if doc in int_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
 
-    # 4. Diversity
+    # 7. Diversity
     if forbidden_patterns:
         for pattern in forbidden_patterns:
-            model.Add(sum([shifts[(doc, d)] for doc, d in pattern]) <= len(pattern) - 3)
+            # Check variables relevant to the pattern
+            relevant = []
+            for doc, d in pattern:
+                if (doc, d) in shifts:
+                    relevant.append(shifts[(doc, d)])
+            if relevant:
+                model.Add(sum(relevant) <= len(relevant) - 3)
 
     weekend_days = [d for d in days if date(year, month, d).weekday() >= 5]
     weekday_days = [d for d in days if date(year, month, d).weekday() < 5]
     month_weeks = calendar.monthcalendar(year, month)
 
-    W_LIMIT_BREAK = 5000; W_FAIRNESS = 1000; W_WISH = 10
-    W_NOGO = 5000 # High priority for avoiding unwanted shifts
-
-    # 5. Intern/PGY Specific Limits (Soft)
-    for doc in all_staff:
+    W_LIMIT_BREAK = 5000; W_FAIRNESS = 1000; W_NOGO = 5000; W_WISH = 10
+    
+    # 8. Intern/PGY Limits
+    for doc in pgy_staff + int_staff:
         is_intern = doc in int_staff
         limit_weight = W_LIMIT_BREAK if is_intern else (W_LIMIT_BREAK / 2)
 
@@ -327,14 +357,21 @@ def solve_small_shift(pgy_staff, int_staff, days, pgy_leaves, int_leaves, pgy_no
         obj_terms.append(slack_we * -limit_weight)
         sacrifices.append((slack_we, f"{doc} 假日超過 2 班"))
 
-    # 6. Point System Limit (Lower Priority than No-Go)
-    add_point_system_constraint(model, shifts, all_staff, days, obj_terms, sacrifices, limit=8, weight=200)
+    # 9. Point System (PGY/Int) - High Penalty for exceeding (1000)
+    # We want to encourage R support (cost 100) if PGY points > 8 (cost 1000)
+    add_point_system_constraint(model, shifts, pgy_staff + int_staff, days, obj_terms, sacrifices, limit=8, weight=1000)
 
-    # 7. Fairness
-    add_fairness_objective(model, shifts, all_staff, days, obj_terms, weight=W_FAIRNESS)
-    
-    # 8. Preferences (No-Go is King)
-    for doc in all_staff:
+    # 10. R Support Penalty (Cost = 100)
+    # This acts as a soft barrier. R will only be used if other penalties (PGY overload) exceed 100.
+    for doc in r_staff:
+        for d in days:
+            obj_terms.append(shifts[(doc, d)] * -100)
+            sacrifices.append((shifts[(doc, d)], f"{doc} (R) 支援小班 ({month}/{d})"))
+
+    # 11. Fairness & Preferences
+    add_fairness_objective(model, shifts, pgy_staff + int_staff, days, obj_terms, weight=W_FAIRNESS)
+
+    for doc in pgy_staff + int_staff:
         nogo_list = pgy_nogo.get(doc, []) if doc in pgy_staff else int_nogo.get(doc, [])
         wish_list = pgy_wishes.get(doc, []) if doc in pgy_staff else int_wishes.get(doc, [])
         
@@ -352,7 +389,7 @@ def solve_small_shift(pgy_staff, int_staff, days, pgy_leaves, int_leaves, pgy_no
     
     result_pattern = []
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        for doc in all_staff:
+        for doc in all_small_candidates:
             for d in days:
                 if solver.Value(shifts[(doc, d)]) == 1:
                     result_pattern.append((doc, d))
@@ -467,7 +504,8 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
         for i in range(num_solutions):
             progress.text(f"運算中... ({i+1}/{num_solutions})")
             
-            b_sol, b_stat, b_shifts, b_sac, b_pat = solve_big_shift(
+            # 1. Solve Big Shift
+            b_sol, b_stat, b_shifts, b_sac, b_pat, r_schedule_map = solve_big_shift(
                 vs_staff, r_staff, dates, 
                 st.session_state.vs_leaves, st.session_state.r_leaves,
                 st.session_state.vs_wishes, st.session_state.vs_nogo, 
@@ -475,11 +513,13 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
                 forbidden_patterns=forbidden_big
             )
             
+            # 2. Solve Small Shift (With R Support Logic)
             s_sol, s_stat, s_shifts, s_sac, s_pat = solve_small_shift(
-                pgy_staff, int_staff, dates, 
+                pgy_staff, int_staff, r_staff, dates, 
                 st.session_state.pgy_leaves, st.session_state.int_leaves,
                 st.session_state.pgy_nogo, st.session_state.pgy_wishes, 
                 st.session_state.int_nogo, st.session_state.int_wishes,
+                st.session_state.r_nogo, r_schedule_map, # Pass R info
                 forbidden_patterns=forbidden_small
             )
 
@@ -494,7 +534,7 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
         progress.empty()
         
         if not big_solutions or not small_solutions:
-            st.error("無法找出可行解！請嘗試減少「絕對請假」的日期。")
+            st.error("無法找出可行解！")
         else:
             st.success(f"成功生成 {min(len(big_solutions), len(small_solutions))} 組方案！")
             tabs = st.tabs([f"方案 {i+1}" for i in range(min(len(big_solutions), len(small_solutions)))])
@@ -505,13 +545,14 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
                     s_data = small_solutions[i]
                     
                     df_big = generate_df(b_data[0], b_data[1], vs_staff+r_staff, dates, "大班")
-                    df_small = generate_df(s_data[0], s_data[1], pgy_staff+int_staff, dates, "小班")
+                    # Small shift includes R support now
+                    df_small = generate_df(s_data[0], s_data[1], pgy_staff+int_staff+r_staff, dates, "小班")
                     
                     sac_big = get_report(b_data[0], b_data[2])
                     sac_small = get_report(s_data[0], s_data[2])
                     
                     if sac_big or sac_small:
-                        with st.expander("⚠️ 犧牲報告 (點數超標/違反意願)", expanded=True):
+                        with st.expander("⚠️ 犧牲報告 (點數超標/違反意願/R支援)", expanded=True):
                             if sac_big: 
                                 st.write("**[大班 (產房)]**")
                                 for s in sac_big: st.write(f"- 🔴 {s}")
@@ -526,7 +567,7 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
                         st.markdown("**大班統計**")
                         st.dataframe(calculate_stats(df_big), use_container_width=True)
                     with c2: 
-                        st.markdown("**小班統計**")
+                        st.markdown("**小班統計 (含 R 支援)**")
                         st.dataframe(calculate_stats(df_small), use_container_width=True)
 
                     st.markdown(get_html_calendar(df_big, df_small), unsafe_allow_html=True)
