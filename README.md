@@ -1,27 +1,59 @@
-# 🏥 婦產科雙軌排班系統 (v3.6 Excel日曆版)
+# Dual-Track Medical Rostering System
 
-本系統專為「總醫師」設計，支援 **Excel 日曆格式導出**，下載後直接呈現週曆樣式，方便進行人工微調與發布。
+An advanced constraint satisfaction solver for medical resident scheduling, powered by **Google OR-Tools** and **Streamlit**.
 
-## ✨ v3.6 新增功能
+This system implements a dual-track scheduling logic ("Big Shift" for Delivery Room, "Small Shift" for General Wards) to optimize workforce allocation while strictly adhering to hospital regulations and maximizing fairness.
 
-### 1. 📅 Excel 日曆格式導出
-*   **所見即所得**：下載的 CSV 檔不再是長長的清單，而是已經排版好的週曆。
-*   **格式結構**：
-    *   第一列：日期 (12/1)
-    *   第二列：[產] 醫師名
-    *   第三列：[小] 醫師名
-    *   (分隔行)
-*   **優點**：總醫師可以直接在 Excel 中拖拉換班，不用再自己畫格子。
+## 🚀 Features at a Glance
 
-### 2. ⛔️ 絕對排除 (Hard Constraints)
-區分「絕對請假」與「不想值班」，確保婚喪喜慶絕不排班。
+### 1. Mathematical Optimization
+*   **Constraint Satisfaction Problem (CSP):** Models staffing requirements, labor laws, and personal preferences as mathematical constraints.
+*   **Weighted Objective Function:** Balances conflicting goals (Fairness > Preferences) using penalty weights.
+*   **Heuristic Search:** Generates multiple distinct feasible solutions using diversity constraints.
 
-### 3. ⚖️ 公平性優先 & 多方案
-自動計算 1~5 個方案，並強制讓平日/假日班數平均分配。
+### 2. Weighted Point System (New in v4.0)
+To ensure equitable workload distribution:
+*   **Weekday Shift:** 1 Point
+*   **Weekend Shift:** 2 Points
+*   **Target:** $\sum Points \le 8$ per month.
+*   **Soft Limit:** If a doctor exceeds 8 points due to labor shortage, the system allows it but flags the violation in the **Sacrifice Report**.
 
-## 🚀 使用流程
-1.  **輸入資料**：人員、請假、意願。
-2.  **運算**：產生多組方案。
-3.  **選擇**：比較統計數據與犧牲報告。
-4.  **下載**：點擊 **「📥 下載 Excel 日曆格式」**。
-5.  **微調**：用 Excel 打開 CSV，直接剪下貼上進行最後確認。
+### 3. Dual-Track Logic
+*   **Big Shift (Delivery Room):**
+    *   **Attending (VS):** High-priority designated shifts.
+    *   **Resident (R):** Fills gaps; protected by "No-Go" constraints.
+*   **Small Shift (General Ward):**
+    *   **Intern/PGY:** Subject to strict limits (max 2 shifts/week, 6 weekdays/month, 2 weekends/month).
+
+## 🧮 Algorithmic Details
+
+The core solver uses the **CP-SAT** (Constraint Programming - SATisfiability) solver from Google OR-Tools.
+
+### Decision Variables
+Let $X_{d, s}$ be a boolean variable where:
+*   $d \in \{1, ..., DaysInMonth\}$
+*   $s \in \{StaffMembers\}$
+*   $X_{d, s} = 1$ if staff $s$ is assigned to day $d$, else $0$.
+
+### Constraints
+1.  **Coverage:** $\sum_{s} X_{d, s} = 1$ for all $d$. (One doctor per day)
+2.  **Recovery:** $X_{d, s} + X_{d+1, s} \le 1$. (No back-to-back shifts)
+3.  **Hard Leaves:** $X_{d, s} = 0$ for absolute leave dates.
+4.  **Workload Limits:** $\sum_{d \in Week} X_{d, s} \le 2$ (for Interns).
+
+### Objective Function ($Max$)
+$$
+\text{Maximize } \sum (W_{fairness} \times Fairness) - \sum (W_{penalty} \times Violations) + \sum (W_{wish} \times Preferences)
+$$
+*   **Fairness:** Minimizes variance in shift counts (Weekday/Weekend) across staff.
+*   **Violations:** Penalties for exceeding point limits or assigning "No-Go" shifts.
+
+## 📦 Installation & Usage
+
+### Prerequisites
+*   Python 3.8+
+*   `pip install -r requirements.txt`
+
+### Running the Application
+```bash
+streamlit run app.py
