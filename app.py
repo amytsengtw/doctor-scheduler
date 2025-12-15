@@ -8,7 +8,7 @@ from datetime import date
 st.set_page_config(page_title="分級排班系統", layout="wide")
 
 st.title("🏥 台灣醫護分級排班系統")
-st.caption("v2.0 分級版：實習醫師保護機制 + 住院醫師彈性上限 (Max 8)")
+st.caption("v2.2 智慧救援版：三段式排班邏輯 (完美 -> 放寬工時 -> 放寬預排)")
 
 # --- 2. 側邊欄設定 ---
 st.sidebar.header("設定參數")
@@ -29,9 +29,8 @@ st.sidebar.subheader("2. 身份設定")
 interns = st.sidebar.multiselect(
     "誰是實習醫師 (Intern)?",
     options=all_staff,
-    help="實習醫師將受到嚴格保護：7天限2班、月限6平日2假日"
+    help="實習醫師保護：單週限2班、月限6平日2假日"
 )
-# 剩下的是住院醫師 (Residents)
 residents = [d for d in all_staff if d not in interns]
 
 st.sidebar.markdown("---")
@@ -42,11 +41,13 @@ duty_requests = {}
 
 if all_staff:
     with st.sidebar.expander("🚫 預假 (不想值班)", expanded=True):
+        st.caption("除非沒人可值，否則系統會避開")
         for doc in all_staff:
             leaves = st.multiselect(f"{doc} 預假", options=dates, key=f"leave_{doc}")
             leave_requests[doc] = leaves
 
     with st.sidebar.expander("✅ 指定值班 (預排)", expanded=False):
+        st.caption("優先滿足。若發生衝突，第三階段排班會自動取捨")
         for doc in all_staff:
             duties = st.multiselect(f"{doc} 指定值班", options=dates, key=f"duty_{doc}")
             duty_requests[doc] = duties
@@ -54,7 +55,10 @@ else:
     st.sidebar.warning("請先輸入人員名單")
 
 # --- 3. 輔助函式：產生 HTML 日曆 ---
-def get_calendar_html(year, month, schedule_map):
+def get_calendar_html(year, month, schedule_map, broken_duties=None):
+    if broken_duties is None:
+        broken_duties = []
+        
     cal = calendar.monthcalendar(year, month)
     html_content = """
     <style>
@@ -63,7 +67,8 @@ def get_calendar_html(year, month, schedule_map):
         .calendar-table td { height: 100px; vertical-align: top; padding: 5px; border: 1px solid #ddd; width: 14.28%; background-color: white; }
         .day-number { font-size: 12px; color: #666; margin-bottom: 5px; text-align: right; }
         .doc-badge { background-color: #e8f0fe; color: #1557b0; padding: 4px; border-radius: 4px; font-size: 14px; font-weight: bold; text-align: center; display: block; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
-        .doc-badge.intern { background-color: #fce8e6; color: #c5221f; } /* 實習醫師紅色標示 */
+        .doc-badge.intern { background-color: #fce8e6; color: #c5221f; }
+        .doc-badge.broken { border: 2px dashed orange; } /* 未滿足預排的標示 */
         .weekend-td { background-color: #fafafa !important; }
         .empty-td { background-color: #f9f9f9; }
     </style>
@@ -86,7 +91,6 @@ def get_calendar_html(year, month, schedule_map):
                 doc = schedule_map.get(day, "")
                 html_content += f'<td class="{td_class}"><div class="day-number">{day}</div>'
                 if doc:
-                    # 如果是 Intern，給不同的 CSS class
                     badge_class = "doc-badge intern" if doc in interns else "doc-badge"
                     html_content += f'<div class="{badge_class}">{doc}</div>'
                 html_content += '</td>'
@@ -95,7 +99,8 @@ def get_calendar_html(year, month, schedule_map):
     return html_content
 
 # --- 4. 核心函式：排班演算法 ---
-def solve_model(all_staff, interns, residents, days_in_month, leave_requests, duty_requests, strict_resident_limit=True):
+def solve_model(all_staff, interns, residents, days_in_month, leave_requests, duty_requests, 
+                strict_resident_limit=True, enforce_duty_requests=True):
     model = cp_model.CpModel()
     shifts = {}
 
@@ -108,52 +113,54 @@ def solve_model(all_staff, interns, residents, days_in_month, leave_requests, du
     for day in range(1, days_in_month + 1):
         model.Add(sum(shifts[(doc, day)] for doc in all_staff) == 1)
 
-    # 2. 所有人：不能連續值班 (No back-to-back)
+    # 2. 所有人：不能連續值班
     for doc in all_staff:
         for day in range(1, days_in_month):
             model.Add(shifts[(doc, day)] + shifts[(doc, day + 1)] <= 1)
 
-    # 3. 處理預假與指定值班
+    # 3. 預假 (Leave) - 視為硬限制 (除非連這都拿掉，但通常不想值班就是不想)
     for doc, days_off in leave_requests.items():
         for day in days_off:
             model.Add(shifts[(doc, day)] == 0)
-    for doc, days_on in duty_requests.items():
-        for day in days_on:
-            model.Add(shifts[(doc, day)] == 1)
 
-    # ==========================================
-    # 4. 實習醫師 (Intern) 專屬限制 - 嚴格保護
-    # ==========================================
+    # 4. 指定值班 (Duty) - 根據參數決定是否為硬限制
+    if enforce_duty_requests:
+        # 硬限制：一定要排
+        for doc, days_on in duty_requests.items():
+            for day in days_on:
+                model.Add(shifts[(doc, day)] == 1)
+    else:
+        # 軟限制：盡量排 (加入目標函式 Maximize)
+        # 我們希望滿足越多越好
+        requested_shifts = []
+        for doc, days_on in duty_requests.items():
+            for day in days_on:
+                requested_shifts.append(shifts[(doc, day)])
+        if requested_shifts:
+            model.Maximize(sum(requested_shifts))
+
+    # 5. 實習醫師 (Intern) 限制
     if interns:
         weekend_days = [d for d in range(1, days_in_month + 1) if date(year, month, d).weekday() >= 5]
         weekday_days = [d for d in range(1, days_in_month + 1) if date(year, month, d).weekday() < 5]
+        month_weeks = calendar.monthcalendar(year, month)
 
         for doc in interns:
-            # A. 7天內最多2班
-            if days_in_month >= 7:
-                for day in range(1, days_in_month - 5):
-                    week_window = [shifts[(doc, d)] for d in range(day, day + 7)]
-                    model.Add(sum(week_window) <= 2)
-            
-            # B. 每月平日最多 6 班
+            for week in month_weeks:
+                valid_days_in_week = [d for d in week if d != 0]
+                if valid_days_in_week:
+                     model.Add(sum(shifts[(doc, d)] for d in valid_days_in_week) <= 2)
             model.Add(sum(shifts[(doc, d)] for d in weekday_days) <= 6)
-
-            # C. 每月假日最多 2 班
             model.Add(sum(shifts[(doc, d)] for d in weekend_days) <= 2)
 
-    # ==========================================
-    # 5. 住院醫師 (Resident) 限制
-    # ==========================================
+    # 6. 住院醫師 (Resident) 限制
     if residents:
-        # 為了公平，還是要有個基本的假日平均分配，但放寬一點
         weekend_days = [d for d in range(1, days_in_month + 1) if date(year, month, d).weekday() >= 5]
         if weekend_days:
-             # 平均數向上取整 + 1 (寬鬆一點)
             max_weekend = (len(weekend_days) // len(residents + interns)) + 2 
             for doc in residents:
                 model.Add(sum(shifts[(doc, d)] for d in weekend_days) <= max_weekend)
 
-        # 關鍵：是否開啟「嚴格 8 班限制」
         if strict_resident_limit:
             for doc in residents:
                 model.Add(sum(shifts[(doc, d)] for d in range(1, days_in_month + 1)) <= 8)
@@ -164,28 +171,47 @@ def solve_model(all_staff, interns, residents, days_in_month, leave_requests, du
     return solver, status, shifts
 
 def solve_schedule_logic(all_staff, interns, residents, days_in_month, leave_requests, duty_requests):
-    # 第一階段：嘗試嚴格限制 (住院醫師 <= 8)
-    solver, status, shifts = solve_model(all_staff, interns, residents, days_in_month, leave_requests, duty_requests, strict_resident_limit=True)
-    
+    warning_level = 0
     warning_msg = None
-
-    # 如果失敗，進入第二階段：放寬住院醫師限制
+    
+    # [Level 1] 完美模式：限 8 班 + 強制預排
+    solver, status, shifts = solve_model(all_staff, interns, residents, days_in_month, leave_requests, duty_requests, 
+                                         strict_resident_limit=True, enforce_duty_requests=True)
+    
+    # [Level 2] 救援模式 A：放寬 8 班限制 + 強制預排
     if status != cp_model.OPTIMAL and status != cp_model.FEASIBLE:
-        warning_msg = "⚠️ 注意：人力吃緊，無法滿足「每人 8 班」限制。系統已自動放寬上限以產出班表。"
-        solver, status, shifts = solve_model(all_staff, interns, residents, days_in_month, leave_requests, duty_requests, strict_resident_limit=False)
+        warning_level = 1
+        warning_msg = "⚠️ 警告：人力不足，已放寬住院醫師「每月 8 班」限制。"
+        solver, status, shifts = solve_model(all_staff, interns, residents, days_in_month, leave_requests, duty_requests, 
+                                             strict_resident_limit=False, enforce_duty_requests=True)
+
+    # [Level 3] 救援模式 B：放寬 8 班限制 + 放寬預排 (盡力而為)
+    if status != cp_model.OPTIMAL and status != cp_model.FEASIBLE:
+        warning_level = 2
+        warning_msg = "⛔️ 嚴重警告：無法滿足「指定值班」需求！系統已自動犧牲部分預排以確保產出班表。"
+        solver, status, shifts = solve_model(all_staff, interns, residents, days_in_month, leave_requests, duty_requests, 
+                                             strict_resident_limit=False, enforce_duty_requests=False)
 
     results = []
     schedule_map = {}
     doctor_stats = {doc: {'Total': 0, 'Weekend': 0, 'Weekday': 0} for doc in all_staff}
+    unmet_duties = []
 
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
         for day in range(1, days_in_month + 1):
             for doc in all_staff:
-                if solver.Value(shifts[(doc, day)]) == 1:
+                is_shift = solver.Value(shifts[(doc, day)]) == 1
+                
+                # 檢查 Level 3 是否有犧牲掉預排
+                if warning_level == 2:
+                    # 如果這天是 doc 指定的，但他沒排到
+                    if doc in duty_requests and day in duty_requests[doc] and not is_shift:
+                        unmet_duties.append(f"{month}/{day} {doc}")
+
+                if is_shift:
                     weekday_int = date(year, month, day).weekday()
                     weekday_str = date(year, month, day).strftime("%a")
                     is_weekend = weekday_int >= 5
-                    
                     role = "Intern" if doc in interns else "Resident"
 
                     results.append({
@@ -195,7 +221,6 @@ def solve_schedule_logic(all_staff, interns, residents, days_in_month, leave_req
                         "身份": role,
                         "類型": "週末班" if is_weekend else "平日班"
                     })
-                    
                     schedule_map[day] = doc
                     doctor_stats[doc]['Total'] += 1
                     if is_weekend:
@@ -203,9 +228,9 @@ def solve_schedule_logic(all_staff, interns, residents, days_in_month, leave_req
                     else:
                         doctor_stats[doc]['Weekday'] += 1
         
-        return pd.DataFrame(results), doctor_stats, schedule_map, warning_msg
+        return pd.DataFrame(results), doctor_stats, schedule_map, warning_msg, unmet_duties
     else:
-        return None, None, None, "❌ 排班失敗：即使放寬住院醫師限制，仍無法滿足實習醫師的保護條款或指定值班衝突。"
+        return None, None, None, "❌ 徹底失敗：即使放寬所有條件仍無解 (可能是預假太多導致某天沒人)", []
 
 # --- 5. 主程式執行區 ---
 st.markdown("---")
@@ -219,27 +244,31 @@ if run_btn:
     if not all_staff:
         st.warning("請先輸入醫師名單")
     else:
-        with st.spinner("運算中 (優先嘗試 8 班限制)..."):
-            df_schedule, stats, schedule_map, warning = solve_schedule_logic(
+        with st.spinner("智慧運算中 (嘗試三段式救援邏輯)..."):
+            df_schedule, stats, schedule_map, warning, unmet = solve_schedule_logic(
                 all_staff, interns, residents, days_in_month, leave_requests, duty_requests
             )
         
         if df_schedule is not None:
-            # 顯示警告訊息 (如果有)
             if warning:
-                st.warning(warning)
+                if "嚴重" in warning:
+                    st.error(warning)
+                else:
+                    st.warning(warning)
             else:
-                st.success("✅ 完美排班：所有住院醫師皆在 8 班以內！")
+                st.success("✅ 完美排班：符合所有限制與需求！")
 
-            # 顯示日曆
+            if unmet:
+                st.write("### 📉 遺憾清單 (無法滿足的預排)")
+                st.write(", ".join(unmet))
+
             st.subheader(f"📅 {year}年{month}月 排班月曆")
-            st.caption("🟥 紅色底色代表實習醫師 (Intern)")
+            st.caption("🟥 紅色: Intern | ⬜ 一般: Resident")
             cal_html = get_calendar_html(year, month, schedule_map)
             st.markdown(cal_html, unsafe_allow_html=True)
 
             st.markdown("---")
             
-            # 顯示表格與統計
             col_a, col_b = st.columns([2, 1])
             with col_a:
                 st.subheader("詳細清單")
@@ -248,9 +277,9 @@ if run_btn:
                 st.subheader("📊 班數統計")
                 stats_df = pd.DataFrame.from_dict(stats, orient='index')
                 st.dataframe(stats_df, use_container_width=True)
-                st.caption("Intern 限制：平日<=6, 假日<=2")
+                if interns:
+                    st.info("ℹ️ Intern 限制：\n- 單週 (Mon-Sun) <= 2\n- 月平日 <= 6\n- 月假日 <= 2")
             
-            # 下載按鈕
             csv = df_schedule.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
                 "📥 下載 CSV",
