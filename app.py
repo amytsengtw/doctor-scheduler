@@ -7,10 +7,10 @@ import json
 import hashlib
 
 # --- 1. Page Configuration ---
-st.set_page_config(page_title="產房/小班 雙軌排班系統 (Q3優化版)", layout="wide")
+st.set_page_config(page_title="產房/小班 雙軌排班系統 (意願優先版)", layout="wide")
 
-st.title("🏥 婦產科雙軌排班系統 (v4.2 Q3優化版)")
-st.caption("特色：Q3排班原則 (盡量間隔兩天) | 點數負載平衡 | 絕對排除 | 多方案")
+st.title("🏥 婦產科雙軌排班系統 (v4.3 意願優先版)")
+st.caption("調整邏輯：不想值班 (No-Go) > 點數上限 (<=8) | 寧可點數超標，也要避開不想值的日子")
 
 # --- 2. Session State Management ---
 default_state = {
@@ -20,9 +20,7 @@ default_state = {
     "r_list": "洋洋(R3), 蹦蹦(R2)",
     "pgy_list": "小明(PGY), 小華(PGY), 小強(PGY)",
     "int_list": "菜鳥A(Int), 菜鳥B(Int)",
-    # Hard Constraints
     "vs_leaves": {}, "r_leaves": {}, "pgy_leaves": {}, "int_leaves": {},
-    # Soft Constraints
     "vs_wishes": {},  "vs_nogo": {},
     "r_wishes": {},   "r_nogo": {},
     "pgy_wishes": {}, "pgy_nogo": {},
@@ -103,19 +101,19 @@ c1, c2 = st.columns(2)
 with c1:
     with st.expander("🔴 大班意願", expanded=False):
         update_pref("vs_wishes", vs_staff, "VS 指定值班", "優先排入")
-        update_pref("vs_nogo", vs_staff, "VS 不想值", "盡量避開")
+        update_pref("vs_nogo", vs_staff, "VS 不想值", "權重極高，優先避開")
         st.markdown("---")
-        update_pref("r_nogo", r_staff, "R 不想值", "盡量避開")
+        update_pref("r_nogo", r_staff, "R 不想值", "權重極高，優先避開")
         update_pref("r_wishes", r_staff, "R 想值", "額外加分")
 with c2:
     with st.expander("🔵 小班意願", expanded=False):
-        update_pref("pgy_nogo", pgy_staff, "PGY 不想值", "盡量避開")
+        update_pref("pgy_nogo", pgy_staff, "PGY 不想值", "權重極高，優先避開")
         update_pref("pgy_wishes", pgy_staff, "PGY 想值", "額外加分")
         st.markdown("---")
-        update_pref("int_nogo", int_staff, "Int 不想值", "盡量避開")
+        update_pref("int_nogo", int_staff, "Int 不想值", "權重極高，優先避開")
         update_pref("int_wishes", int_staff, "Int 想值", "額外加分")
 
-# --- 5. Core Algorithms (Updated with Q3 Logic) ---
+# --- 5. Core Algorithms ---
 
 def add_fairness_objective(model, shifts, staff_list, days, obj_terms, weight=500):
     if not staff_list: return
@@ -140,7 +138,12 @@ def add_fairness_objective(model, shifts, staff_list, days, obj_terms, weight=50
         model.Add(dev_we >= avg_we - we_count)
         obj_terms.append(dev_we * -weight)
 
-def add_point_system_constraint(model, shifts, staff_list, days, obj_terms, sacrifices, limit=8, weight=1000):
+def add_point_system_constraint(model, shifts, staff_list, days, obj_terms, sacrifices, limit=8, weight=200):
+    """
+    Weighted Point System.
+    Weight lowered to 200 (Lower priority than No-Go which is 5000).
+    It allows points to exceed 8 if necessary to satisfy No-Go preferences.
+    """
     weekend_days = [d for d in days if date(year, month, d).weekday() >= 5]
     weekday_days = [d for d in days if date(year, month, d).weekday() < 5]
 
@@ -150,26 +153,16 @@ def add_point_system_constraint(model, shifts, staff_list, days, obj_terms, sacr
                                   sum(shifts[(doc, d)] for d in weekend_days) * 2)
         slack = model.NewIntVar(0, 50, f"slack_pts_{doc}")
         model.Add(total_points <= limit + slack)
+        
+        # Low weight penalty -> Sacrificed first
         obj_terms.append(slack * -weight)
-        sacrifices.append((slack, f"{doc} 點數超標 (目前>{limit}點)"))
+        sacrifices.append((slack, f"{doc} 點數超標 (>{limit}點)"))
 
 def add_spacing_preference(model, shifts, staff_list, days, obj_terms, weight=100):
-    """
-    [New Feature] Try to avoid Q2 schedule (Shift - Off - Shift).
-    Ideally, we want Shift - Off - Off - Shift (Q3) or better.
-    This logic penalizes if shift[d] and shift[d+2] are both 1.
-    """
     for doc in staff_list:
-        # Loop until d-2 (to prevent index out of bounds for d+2)
         for d in range(1, len(days) - 1):
-            # Create a slack variable for Q2 violation
             q2_violation = model.NewBoolVar(f"q2_{doc}_{d}")
-            
-            # Constraint: shift[d] + shift[d+2] <= 1 + q2_violation
-            # If both are 1, q2_violation MUST be 1.
             model.Add(shifts[(doc, d)] + shifts[(doc, d+2)] <= 1 + q2_violation)
-            
-            # Penalize Q2 pattern
             obj_terms.append(q2_violation * -weight)
 
 def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_nogo, r_nogo, r_wishes, forbidden_patterns=None):
@@ -211,30 +204,35 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
             for d in dates_on:
                 model.Add(shifts[(doc, d)] == 1) 
     
-    # 6. Objectives
+    # 6. Objectives (Weights Adjusted)
+    
+    # Fairness (Medium Priority)
     W_FAIRNESS = 2000
     add_fairness_objective(model, shifts, r_staff, days, obj_terms, weight=W_FAIRNESS)
     
-    W_POINT_LIMIT = 3000
+    # Point Limit (Lower Priority - Sacrificed to save No-Go)
+    W_POINT_LIMIT = 200
     add_point_system_constraint(model, shifts, r_staff, days, obj_terms, sacrifices, limit=8, weight=W_POINT_LIMIT)
 
-    # 7. [New] Q3 Spacing Preference
-    W_SPACING = 100 # Priority: Lower than Fairness/Points, higher than generic wishes
+    # Q3 Spacing (Lowest Priority)
+    W_SPACING = 50
     add_spacing_preference(model, shifts, r_staff, days, obj_terms, weight=W_SPACING)
 
-    # 8. Preferences
-    W_R_NOGO = 200; W_VS_NOGO = 500; W_VS_SUPPORT = 500; W_R_WISH = 10
+    # 7. Preferences (High Priority for No-Go)
+    W_NOGO = 5000       # High Penalty: Avoid No-Go at all costs
+    W_VS_SUPPORT = 5000 # High Penalty: Don't use VS for support unless desperate
+    W_R_WISH = 10
     
     for doc, dates_off in r_nogo.items():
         if doc in r_staff:
             for d in dates_off:
-                obj_terms.append(shifts[(doc, d)] * -W_R_NOGO)
+                obj_terms.append(shifts[(doc, d)] * -W_NOGO)
                 sacrifices.append((shifts[(doc, d)], f"{doc} (R) 排入 No-Go ({month}/{d})"))
     
     for doc, dates_off in vs_nogo.items():
         if doc in vs_staff:
             for d in dates_off:
-                obj_terms.append(shifts[(doc, d)] * -W_VS_NOGO)
+                obj_terms.append(shifts[(doc, d)] * -W_NOGO)
                 sacrifices.append((shifts[(doc, d)], f"{doc} (VS) 排入 No-Go ({month}/{d})"))
 
     for doc in vs_staff:
@@ -300,9 +298,10 @@ def solve_small_shift(pgy_staff, int_staff, days, pgy_leaves, int_leaves, pgy_no
     weekday_days = [d for d in days if date(year, month, d).weekday() < 5]
     month_weeks = calendar.monthcalendar(year, month)
 
-    W_LIMIT_BREAK = 5000; W_FAIRNESS = 1000; W_NOGO = 100; W_WISH = 10
+    W_LIMIT_BREAK = 5000; W_FAIRNESS = 1000; W_WISH = 10
+    W_NOGO = 5000 # High priority for avoiding unwanted shifts
 
-    # 5. Intern/PGY Specific Limits
+    # 5. Intern/PGY Specific Limits (Soft)
     for doc in all_staff:
         is_intern = doc in int_staff
         limit_weight = W_LIMIT_BREAK if is_intern else (W_LIMIT_BREAK / 2)
@@ -328,14 +327,13 @@ def solve_small_shift(pgy_staff, int_staff, days, pgy_leaves, int_leaves, pgy_no
         obj_terms.append(slack_we * -limit_weight)
         sacrifices.append((slack_we, f"{doc} 假日超過 2 班"))
 
-    add_point_system_constraint(model, shifts, all_staff, days, obj_terms, sacrifices, limit=8, weight=3000)
+    # 6. Point System Limit (Lower Priority than No-Go)
+    add_point_system_constraint(model, shifts, all_staff, days, obj_terms, sacrifices, limit=8, weight=200)
+
+    # 7. Fairness
     add_fairness_objective(model, shifts, all_staff, days, obj_terms, weight=W_FAIRNESS)
     
-    # 6. [New] Q3 Spacing Preference
-    W_SPACING = 100
-    add_spacing_preference(model, shifts, all_staff, days, obj_terms, weight=W_SPACING)
-
-    # 7. Preferences
+    # 8. Preferences (No-Go is King)
     for doc in all_staff:
         nogo_list = pgy_nogo.get(doc, []) if doc in pgy_staff else int_nogo.get(doc, [])
         wish_list = pgy_wishes.get(doc, []) if doc in pgy_staff else int_wishes.get(doc, [])

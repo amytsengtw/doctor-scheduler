@@ -1,4 +1,4 @@
-# Dual-Track Medical Rostering System (v4.2 Q3 Edition)
+# Dual-Track Medical Rostering System (v4.3 Priority Update)
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
 [![Solver](https://img.shields.io/badge/Solver-Google%20OR--Tools-green)](https://developers.google.com/optimization)
@@ -10,67 +10,50 @@
 
 ## English Documentation
 
-A medical rostering system optimized for **Shift Spacing (Q3 Principle)** and **Fairness**. It ensures doctors have adequate rest between shifts while adhering to labor laws and hospital regulations.
+A medical rostering system with a refined **priority logic**: It prioritizes avoiding "No-Go" preferences over strictly adhering to the 8-point limit.
 
-### 🚀 Key Features (v4.2)
+### 🚀 Key Features (v4.3)
 
-1.  **Q3 Spacing Preference (Smart Rest)**
-    *   **Goal**: Minimize "Shift-Off-Shift" (Q2) patterns.
-    *   **Strategy**: Incentivize "Shift-Off-Off-Shift" (Q3) patterns to ensure at least 2 days of rest between duties.
-    *   *Note: This is a soft constraint. Coverage and fairness still take precedence.*
+1.  **Priority Shift: No-Go > Points**
+    *   **Goal**: If forced to choose between assigning a doctor to a "No-Go" day or making them exceed 8 points, the system will **exceed the points**.
+    *   **Logic**: Violating a "No-Go" preference carries a penalty of **5000**, while exceeding the point limit carries a penalty of **200**.
 
-2.  **Weighted Point System (Load Balancing)**
+2.  **Weighted Point System**
     *   **Weekday Shift**: 1 Point.
     *   **Weekend Shift**: 2 Points.
-    *   **Target**: $\le 8$ points per month per doctor.
+    *   **Target**: $\le 8$ points per month.
 
-3.  **Dual-Track & Multi-Solution**
-    *   Separates **Delivery Room (Big Shift)** and **General Ward (Small Shift)** logic.
-    *   Generates 1~5 distinct feasible schedules for decision support.
-
-### 🧮 Mathematical Model
-
-*   **Variables**: $X_{d, s} \in \{0, 1\}$ (Doctor $s$ works on day $d$).
-*   **Spacing Constraint**: 
-    To discourage Q2 patterns (1-0-1), we apply a penalty if $X_{d, s} + X_{d+2, s} = 2$.
-    $$
-    \text{Minimize } \sum_{d, s} (X_{d, s} \land X_{d+2, s}) \times W_{spacing}
-    $$
+3.  **Q3 Spacing Preference**
+    *   Soft constraint to encourage at least 2 days off between shifts.
 
 ---
 
 ## 中文說明
 
-這是一套具備 **智慧間隔優化 (Smart Spacing)** 的雙軌排班系統。v4.2 版本特別強化了對「生活品質」的重視，盡量避免過於密集的排班。
+這是一套邏輯經過微調的排班系統，v4.3 版本調整了決策優先順序，更貼近人性化排班需求。
 
-### ✨ v4.2 核心功能
+### ✨ v4.3 核心優先級調整
 
-1.  **Q3 排班原則 (Q3 Preference)**
-    *   **痛點**：傳統排班常出現「值1休1值1」(Q2) 的地獄班表。
-    *   **解法**：系統內建軟限制，**盡量讓值班日之間隔開兩天** (Q3)。
-    *   *說明：這是一個加分項目。若人力吃緊，系統仍會以「把班排出來」為優先，但會盡量減少 Q2 的發生。*
+系統在遇到排班衝突時，會依據以下權重進行取捨：
 
-2.  **點數負載平衡**
-    *   **平日 = 1 點** / **假日 = 2 點**。
-    *   系統會監控每位醫師的總點數，目標控制在 **8 點** 以內。若超過，會在犧牲報告中紅字警示。
-
-3.  **雙軌與多方案**
-    *   針對 **大班 (VS+R)** 與 **小班 (PGY+Int)** 分開運算。
-    *   一次提供 1~5 種不同的班表方案，供總醫師挑選。
-
-4.  **Excel 日曆格式輸出**
-    *   下載後的 CSV 檔案直接呈現週曆排版，方便人工微調。
+1.  **⛔️ 絕對請假 (Hard Constraints)**：權重 $\infty$。
+    *   婚喪喜慶、未到職。絕對不會排入。
+2.  **🚫 不想值班 (No-Go Preference)**：權重 **5000**。
+    *   醫師標示「不想值」的日子，系統會盡全力避開。
+3.  **⚖️ 公平性 (Fairness)**：權重 **2000**。
+    *   在避開不想值班日子的前提下，盡量讓大家勞逸不均。
+4.  **📉 點數上限 (Point Limit <= 8)**：權重 **200**。
+    *   **重要變更**：若為了避開某人的 No-Go，導致必須讓另一人點數變為 9 點，系統現在會**選擇讓點數超標**。
+    *   *因為多值一班雖然累，但比在「絕對不想值的日子」值班來得好一點。*
 
 ### 🚀 使用教學
 
-1.  **輸入名單**：填寫四類醫師名單。
-2.  **設定請假**：勾選「絕對無法值班」的日期 (Hard Constraints)。
-3.  **設定意願**：勾選「指定值班」或「不想值班」 (Soft Constraints)。
-4.  **運算**：按下開始，等待系統生成多組方案。
-5.  **決策**：
-    *   查看 **犧牲報告**：確認是否有醫師點數爆表。
-    *   查看 **日曆**：確認是否有過多的 Q2 (隔日值) 班表。
-    *   下載最滿意的方案。
+1.  **設定請假**：勾選「絕對無法值班」的日期。
+2.  **設定意願**：
+    *   勾選 **「不想值班 (No-Go)」**：這是除了請假之外最強力的保護。
+3.  **運算**：按下開始。
+4.  **檢查**：
+    *   如果看到犧牲報告顯示「點數超標」，代表系統為了保護大家的 No-Go 而做出的妥協。
 
 ### 📜 授權
 MIT License
