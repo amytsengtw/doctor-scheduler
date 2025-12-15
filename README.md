@@ -1,59 +1,76 @@
-# Dual-Track Medical Rostering System
+# Dual-Track Medical Rostering System (v4.2 Q3 Edition)
 
-An advanced constraint satisfaction solver for medical resident scheduling, powered by **Google OR-Tools** and **Streamlit**.
+[![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
+[![Solver](https://img.shields.io/badge/Solver-Google%20OR--Tools-green)](https://developers.google.com/optimization)
+[![Streamlit](https://img.shields.io/badge/Framework-Streamlit-red)](https://streamlit.io/)
 
-This system implements a dual-track scheduling logic ("Big Shift" for Delivery Room, "Small Shift" for General Wards) to optimize workforce allocation while strictly adhering to hospital regulations and maximizing fairness.
+[English](#english-documentation) | [中文說明](#中文說明)
 
-## 🚀 Features at a Glance
+---
 
-### 1. Mathematical Optimization
-*   **Constraint Satisfaction Problem (CSP):** Models staffing requirements, labor laws, and personal preferences as mathematical constraints.
-*   **Weighted Objective Function:** Balances conflicting goals (Fairness > Preferences) using penalty weights.
-*   **Heuristic Search:** Generates multiple distinct feasible solutions using diversity constraints.
+## English Documentation
 
-### 2. Weighted Point System (New in v4.0)
-To ensure equitable workload distribution:
-*   **Weekday Shift:** 1 Point
-*   **Weekend Shift:** 2 Points
-*   **Target:** $\sum Points \le 8$ per month.
-*   **Soft Limit:** If a doctor exceeds 8 points due to labor shortage, the system allows it but flags the violation in the **Sacrifice Report**.
+A medical rostering system optimized for **Shift Spacing (Q3 Principle)** and **Fairness**. It ensures doctors have adequate rest between shifts while adhering to labor laws and hospital regulations.
 
-### 3. Dual-Track Logic
-*   **Big Shift (Delivery Room):**
-    *   **Attending (VS):** High-priority designated shifts.
-    *   **Resident (R):** Fills gaps; protected by "No-Go" constraints.
-*   **Small Shift (General Ward):**
-    *   **Intern/PGY:** Subject to strict limits (max 2 shifts/week, 6 weekdays/month, 2 weekends/month).
+### 🚀 Key Features (v4.2)
 
-## 🧮 Algorithmic Details
+1.  **Q3 Spacing Preference (Smart Rest)**
+    *   **Goal**: Minimize "Shift-Off-Shift" (Q2) patterns.
+    *   **Strategy**: Incentivize "Shift-Off-Off-Shift" (Q3) patterns to ensure at least 2 days of rest between duties.
+    *   *Note: This is a soft constraint. Coverage and fairness still take precedence.*
 
-The core solver uses the **CP-SAT** (Constraint Programming - SATisfiability) solver from Google OR-Tools.
+2.  **Weighted Point System (Load Balancing)**
+    *   **Weekday Shift**: 1 Point.
+    *   **Weekend Shift**: 2 Points.
+    *   **Target**: $\le 8$ points per month per doctor.
 
-### Decision Variables
-Let $X_{d, s}$ be a boolean variable where:
-*   $d \in \{1, ..., DaysInMonth\}$
-*   $s \in \{StaffMembers\}$
-*   $X_{d, s} = 1$ if staff $s$ is assigned to day $d$, else $0$.
+3.  **Dual-Track & Multi-Solution**
+    *   Separates **Delivery Room (Big Shift)** and **General Ward (Small Shift)** logic.
+    *   Generates 1~5 distinct feasible schedules for decision support.
 
-### Constraints
-1.  **Coverage:** $\sum_{s} X_{d, s} = 1$ for all $d$. (One doctor per day)
-2.  **Recovery:** $X_{d, s} + X_{d+1, s} \le 1$. (No back-to-back shifts)
-3.  **Hard Leaves:** $X_{d, s} = 0$ for absolute leave dates.
-4.  **Workload Limits:** $\sum_{d \in Week} X_{d, s} \le 2$ (for Interns).
+### 🧮 Mathematical Model
 
-### Objective Function ($Max$)
-$$
-\text{Maximize } \sum (W_{fairness} \times Fairness) - \sum (W_{penalty} \times Violations) + \sum (W_{wish} \times Preferences)
-$$
-*   **Fairness:** Minimizes variance in shift counts (Weekday/Weekend) across staff.
-*   **Violations:** Penalties for exceeding point limits or assigning "No-Go" shifts.
+*   **Variables**: $X_{d, s} \in \{0, 1\}$ (Doctor $s$ works on day $d$).
+*   **Spacing Constraint**: 
+    To discourage Q2 patterns (1-0-1), we apply a penalty if $X_{d, s} + X_{d+2, s} = 2$.
+    $$
+    \text{Minimize } \sum_{d, s} (X_{d, s} \land X_{d+2, s}) \times W_{spacing}
+    $$
 
-## 📦 Installation & Usage
+---
 
-### Prerequisites
-*   Python 3.8+
-*   `pip install -r requirements.txt`
+## 中文說明
 
-### Running the Application
-```bash
-streamlit run app.py
+這是一套具備 **智慧間隔優化 (Smart Spacing)** 的雙軌排班系統。v4.2 版本特別強化了對「生活品質」的重視，盡量避免過於密集的排班。
+
+### ✨ v4.2 核心功能
+
+1.  **Q3 排班原則 (Q3 Preference)**
+    *   **痛點**：傳統排班常出現「值1休1值1」(Q2) 的地獄班表。
+    *   **解法**：系統內建軟限制，**盡量讓值班日之間隔開兩天** (Q3)。
+    *   *說明：這是一個加分項目。若人力吃緊，系統仍會以「把班排出來」為優先，但會盡量減少 Q2 的發生。*
+
+2.  **點數負載平衡**
+    *   **平日 = 1 點** / **假日 = 2 點**。
+    *   系統會監控每位醫師的總點數，目標控制在 **8 點** 以內。若超過，會在犧牲報告中紅字警示。
+
+3.  **雙軌與多方案**
+    *   針對 **大班 (VS+R)** 與 **小班 (PGY+Int)** 分開運算。
+    *   一次提供 1~5 種不同的班表方案，供總醫師挑選。
+
+4.  **Excel 日曆格式輸出**
+    *   下載後的 CSV 檔案直接呈現週曆排版，方便人工微調。
+
+### 🚀 使用教學
+
+1.  **輸入名單**：填寫四類醫師名單。
+2.  **設定請假**：勾選「絕對無法值班」的日期 (Hard Constraints)。
+3.  **設定意願**：勾選「指定值班」或「不想值班」 (Soft Constraints)。
+4.  **運算**：按下開始，等待系統生成多組方案。
+5.  **決策**：
+    *   查看 **犧牲報告**：確認是否有醫師點數爆表。
+    *   查看 **日曆**：確認是否有過多的 Q2 (隔日值) 班表。
+    *   下載最滿意的方案。
+
+### 📜 授權
+MIT License

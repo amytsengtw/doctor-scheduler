@@ -6,11 +6,11 @@ from datetime import date
 import json
 import hashlib
 
-# --- 1. Page Configuration (Traditional Chinese UI) ---
-st.set_page_config(page_title="產房/小班 雙軌排班系統 (點數制)", layout="wide")
+# --- 1. Page Configuration ---
+st.set_page_config(page_title="產房/小班 雙軌排班系統 (Q3優化版)", layout="wide")
 
-st.title("🏥 婦產科雙軌排班系統 (v4.1 點數制)")
-st.caption("特色：點數負載平衡 (平日=1點, 假日=2點, 目標<=8點) | 絕對排除請假 | 多方案生成")
+st.title("🏥 婦產科雙軌排班系統 (v4.2 Q3優化版)")
+st.caption("特色：Q3排班原則 (盡量間隔兩天) | 點數負載平衡 | 絕對排除 | 多方案")
 
 # --- 2. Session State Management ---
 default_state = {
@@ -20,9 +20,9 @@ default_state = {
     "r_list": "洋洋(R3), 蹦蹦(R2)",
     "pgy_list": "小明(PGY), 小華(PGY), 小強(PGY)",
     "int_list": "菜鳥A(Int), 菜鳥B(Int)",
-    # Hard Constraints (Absolute Leaves)
+    # Hard Constraints
     "vs_leaves": {}, "r_leaves": {}, "pgy_leaves": {}, "int_leaves": {},
-    # Soft Constraints (Wishes/No-Go)
+    # Soft Constraints
     "vs_wishes": {},  "vs_nogo": {},
     "r_wishes": {},   "r_nogo": {},
     "pgy_wishes": {}, "pgy_nogo": {},
@@ -86,7 +86,7 @@ def update_pref(key, staff, label, help_t):
         new_prefs[doc] = selection
     st.session_state[key] = new_prefs
 
-# Absolute Leaves (Hard Constraints)
+# Absolute Leaves
 with st.expander("⛔️ 請假/未到職設定 (絕對排除)", expanded=True):
     st.error("注意：此區設定為「硬限制」，系統絕對不會排班。適用於婚喪假、出國、未到職。")
     col_l, col_r = st.columns(2)
@@ -115,13 +115,9 @@ with c2:
         update_pref("int_nogo", int_staff, "Int 不想值", "盡量避開")
         update_pref("int_wishes", int_staff, "Int 想值", "額外加分")
 
-# --- 5. Core Algorithms (Comments in English for Maintainability) ---
+# --- 5. Core Algorithms (Updated with Q3 Logic) ---
 
 def add_fairness_objective(model, shifts, staff_list, days, obj_terms, weight=500):
-    """
-    Minimizes the variance of shifts assigned to each doctor.
-    Ensures load balancing for both weekdays and weekends.
-    """
     if not staff_list: return
     weekend_days = [d for d in days if date(year, month, d).weekday() >= 5]
     weekday_days = [d for d in days if date(year, month, d).weekday() < 5]
@@ -130,16 +126,13 @@ def add_fairness_objective(model, shifts, staff_list, days, obj_terms, weight=50
     avg_we = len(weekend_days) // len(staff_list)
 
     for doc in staff_list:
-        # Weekday Fairness
         wd_count = model.NewIntVar(0, 31, f"wd_cnt_{doc}")
         model.Add(wd_count == sum(shifts[(doc, d)] for d in weekday_days))
-        # Deviation calculation
         dev_wd = model.NewIntVar(0, 31, f"dev_wd_{doc}")
         model.Add(dev_wd >= wd_count - avg_wd)
         model.Add(dev_wd >= avg_wd - wd_count)
         obj_terms.append(dev_wd * -weight)
 
-        # Weekend Fairness
         we_count = model.NewIntVar(0, 31, f"we_cnt_{doc}")
         model.Add(we_count == sum(shifts[(doc, d)] for d in weekend_days))
         dev_we = model.NewIntVar(0, 31, f"dev_we_{doc}")
@@ -148,30 +141,36 @@ def add_fairness_objective(model, shifts, staff_list, days, obj_terms, weight=50
         obj_terms.append(dev_we * -weight)
 
 def add_point_system_constraint(model, shifts, staff_list, days, obj_terms, sacrifices, limit=8, weight=1000):
-    """
-    Implements a weighted point system: Weekday=1, Weekend=2.
-    Soft Constraint: Total Points <= limit (default 8).
-    """
     weekend_days = [d for d in days if date(year, month, d).weekday() >= 5]
     weekday_days = [d for d in days if date(year, month, d).weekday() < 5]
 
     for doc in staff_list:
-        # Calculate points
         total_points = model.NewIntVar(0, 100, f"pts_{doc}")
-        
-        # Points = Sum(Weekday shifts)*1 + Sum(Weekend shifts)*2
         model.Add(total_points == sum(shifts[(doc, d)] for d in weekday_days) * 1 + 
                                   sum(shifts[(doc, d)] for d in weekend_days) * 2)
-        
-        # Slack variable for exceeding the limit
         slack = model.NewIntVar(0, 50, f"slack_pts_{doc}")
         model.Add(total_points <= limit + slack)
-        
-        # Penalize exceeding the limit
         obj_terms.append(slack * -weight)
-        
-        # Record sacrifice if limit is exceeded (Translate log to Chinese)
-        sacrifices.append((slack, f"{doc} 點數超標 (目前>{limit}點, 平日1/假日2)"))
+        sacrifices.append((slack, f"{doc} 點數超標 (目前>{limit}點)"))
+
+def add_spacing_preference(model, shifts, staff_list, days, obj_terms, weight=100):
+    """
+    [New Feature] Try to avoid Q2 schedule (Shift - Off - Shift).
+    Ideally, we want Shift - Off - Off - Shift (Q3) or better.
+    This logic penalizes if shift[d] and shift[d+2] are both 1.
+    """
+    for doc in staff_list:
+        # Loop until d-2 (to prevent index out of bounds for d+2)
+        for d in range(1, len(days) - 1):
+            # Create a slack variable for Q2 violation
+            q2_violation = model.NewBoolVar(f"q2_{doc}_{d}")
+            
+            # Constraint: shift[d] + shift[d+2] <= 1 + q2_violation
+            # If both are 1, q2_violation MUST be 1.
+            model.Add(shifts[(doc, d)] + shifts[(doc, d+2)] <= 1 + q2_violation)
+            
+            # Penalize Q2 pattern
+            obj_terms.append(q2_violation * -weight)
 
 def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_nogo, r_nogo, r_wishes, forbidden_patterns=None):
     model = cp_model.CpModel()
@@ -180,7 +179,6 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
     obj_terms = []
     sacrifices = []
 
-    # Initialize variables
     for doc in all_staff:
         for d in days:
             shifts[(doc, d)] = model.NewBoolVar(f"s_big_{doc}_{d}")
@@ -189,12 +187,12 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
     for d in days:
         model.Add(sum(shifts[(doc, d)] for doc in all_staff) == 1)
 
-    # 2. Hard Constraint: No back-to-back shifts
+    # 2. Hard Constraint: No back-to-back
     for doc in all_staff:
         for d in range(1, len(days)):
              model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
 
-    # 3. Hard Constraint: Absolute Leaves
+    # 3. Absolute Leaves
     for doc, dates_off in vs_leaves.items():
         if doc in vs_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
@@ -202,7 +200,7 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
         if doc in r_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
 
-    # 4. Diversity Constraint
+    # 4. Diversity
     if forbidden_patterns:
         for pattern in forbidden_patterns:
             model.Add(sum([shifts[(doc, d)] for doc, d in pattern]) <= len(pattern) - 3)
@@ -213,14 +211,18 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
             for d in dates_on:
                 model.Add(shifts[(doc, d)] == 1) 
     
-    # 6. Objective: Fairness
+    # 6. Objectives
     W_FAIRNESS = 2000
     add_fairness_objective(model, shifts, r_staff, days, obj_terms, weight=W_FAIRNESS)
+    
+    W_POINT_LIMIT = 3000
+    add_point_system_constraint(model, shifts, r_staff, days, obj_terms, sacrifices, limit=8, weight=W_POINT_LIMIT)
 
-    # 7. Point System Limit (<= 8 points)
-    add_point_system_constraint(model, shifts, r_staff, days, obj_terms, sacrifices, limit=8, weight=3000)
+    # 7. [New] Q3 Spacing Preference
+    W_SPACING = 100 # Priority: Lower than Fairness/Points, higher than generic wishes
+    add_spacing_preference(model, shifts, r_staff, days, obj_terms, weight=W_SPACING)
 
-    # 8. Preferences & Penalties
+    # 8. Preferences
     W_R_NOGO = 200; W_VS_NOGO = 500; W_VS_SUPPORT = 500; W_R_WISH = 10
     
     for doc, dates_off in r_nogo.items():
@@ -247,7 +249,6 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
             for d in dates_on:
                 obj_terms.append(shifts[(doc, d)] * W_R_WISH)
 
-    # Solve
     model.Maximize(sum(obj_terms))
     solver = cp_model.CpSolver()
     solver.parameters.random_seed = len(forbidden_patterns) if forbidden_patterns else 0
@@ -301,12 +302,11 @@ def solve_small_shift(pgy_staff, int_staff, days, pgy_leaves, int_leaves, pgy_no
 
     W_LIMIT_BREAK = 5000; W_FAIRNESS = 1000; W_NOGO = 100; W_WISH = 10
 
-    # 5. Intern/PGY Specific Limits (Soft Constraints)
+    # 5. Intern/PGY Specific Limits
     for doc in all_staff:
         is_intern = doc in int_staff
         limit_weight = W_LIMIT_BREAK if is_intern else (W_LIMIT_BREAK / 2)
 
-        # Weekly Limit: <= 2
         for week in month_weeks:
             valid_days = [d for d in week if d != 0]
             if valid_days:
@@ -316,27 +316,26 @@ def solve_small_shift(pgy_staff, int_staff, days, pgy_leaves, int_leaves, pgy_no
                 obj_terms.append(slack * -limit_weight)
                 sacrifices.append((slack, f"{doc} 單週超過 2 班"))
 
-        # Monthly Weekday Limit: <= 6
         wd_cnt = sum(shifts[(doc, d)] for d in weekday_days)
         slack_wd = model.NewIntVar(0, 31, f"slk_wd_{doc}")
         model.Add(wd_cnt <= 6 + slack_wd)
         obj_terms.append(slack_wd * -limit_weight)
         sacrifices.append((slack_wd, f"{doc} 平日超過 6 班"))
 
-        # Monthly Weekend Limit: <= 2
         we_cnt = sum(shifts[(doc, d)] for d in weekend_days)
         slack_we = model.NewIntVar(0, 31, f"slk_we_{doc}")
         model.Add(we_cnt <= 2 + slack_we)
         obj_terms.append(slack_we * -limit_weight)
         sacrifices.append((slack_we, f"{doc} 假日超過 2 班"))
 
-    # 6. Point System Limit (<= 8 points)
     add_point_system_constraint(model, shifts, all_staff, days, obj_terms, sacrifices, limit=8, weight=3000)
-
-    # 7. Fairness Objective
     add_fairness_objective(model, shifts, all_staff, days, obj_terms, weight=W_FAIRNESS)
+    
+    # 6. [New] Q3 Spacing Preference
+    W_SPACING = 100
+    add_spacing_preference(model, shifts, all_staff, days, obj_terms, weight=W_SPACING)
 
-    # 8. Preferences
+    # 7. Preferences
     for doc in all_staff:
         nogo_list = pgy_nogo.get(doc, []) if doc in pgy_staff else int_nogo.get(doc, [])
         wish_list = pgy_wishes.get(doc, []) if doc in pgy_staff else int_wishes.get(doc, [])
@@ -348,7 +347,6 @@ def solve_small_shift(pgy_staff, int_staff, days, pgy_leaves, int_leaves, pgy_no
             if d in wish_list:
                 obj_terms.append(shifts[(doc, d)] * W_WISH)
 
-    # Solve
     model.Maximize(sum(obj_terms))
     solver = cp_model.CpSolver()
     solver.parameters.random_seed = len(forbidden_patterns) if forbidden_patterns else 0
@@ -375,7 +373,6 @@ def calculate_stats(df):
     if '平日' not in stats.columns: stats['平日'] = 0
     if '假日' not in stats.columns: stats['假日'] = 0
     stats['總班數'] = stats['平日'] + stats['假日']
-    # Calculate Points
     stats['總點數'] = stats['平日'] * 1 + stats['假日'] * 2
     return stats[['總班數', '總點數', '平日', '假日']].sort_values(by='總點數', ascending=False)
 
@@ -429,7 +426,6 @@ def generate_df(solver, shifts, staff, days, name):
             if solver.Value(shifts[(doc, d)]) == 1:
                 w = date(year, month, d).strftime("%a")
                 is_weekend = date(year, month, d).weekday() >= 5
-                # Translate columns to Chinese for UI display
                 res.append({"日期": f"{month}/{d}", "星期": w, "班別": name, "醫師": doc, "類型": "假日" if is_weekend else "平日"})
     return pd.DataFrame(res)
 
@@ -473,7 +469,6 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
         for i in range(num_solutions):
             progress.text(f"運算中... ({i+1}/{num_solutions})")
             
-            # Solve Big Shift
             b_sol, b_stat, b_shifts, b_sac, b_pat = solve_big_shift(
                 vs_staff, r_staff, dates, 
                 st.session_state.vs_leaves, st.session_state.r_leaves,
@@ -482,7 +477,6 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
                 forbidden_patterns=forbidden_big
             )
             
-            # Solve Small Shift
             s_sol, s_stat, s_shifts, s_sac, s_pat = solve_small_shift(
                 pgy_staff, int_staff, dates, 
                 st.session_state.pgy_leaves, st.session_state.int_leaves,
@@ -539,7 +533,6 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
 
                     st.markdown(get_html_calendar(df_big, df_small), unsafe_allow_html=True)
                     
-                    # Excel Format CSV (Chinese)
                     excel_df = generate_excel_calendar_df(df_big, df_small)
                     csv = excel_df.to_csv(index=False, header=False).encode('utf-8-sig')
                     st.download_button(f"📥 下載 Excel 日曆格式 (CSV)", csv, f"roster_cal_{i+1}.csv", "text/csv", key=f"dl_{i}")
