@@ -6,20 +6,20 @@ from datetime import date
 import json
 import hashlib
 
-# --- 1. Page Configuration ---
-st.set_page_config(page_title="Dual-Track Rostering System (Points Edition)", layout="wide")
+# --- 1. Page Configuration (Traditional Chinese UI) ---
+st.set_page_config(page_title="產房/小班 雙軌排班系統 (點數制)", layout="wide")
 
-st.title("🏥 OB/GYN Dual-Track Rostering System (v4.0)")
-st.caption("Feature: Weighted Point System (Weekday=1, Weekend=2, Target<=8) | English Codebase")
+st.title("🏥 婦產科雙軌排班系統 (v4.1 點數制)")
+st.caption("特色：點數負載平衡 (平日=1點, 假日=2點, 目標<=8點) | 絕對排除請假 | 多方案生成")
 
 # --- 2. Session State Management ---
 default_state = {
     "year": 2025,
     "month": 12,
-    "vs_list": "Dr.Ko(VS), Dr.Strange(VS)",
-    "r_list": "Yang(R3), Bon(R2)",
-    "pgy_list": "Ming(PGY), Hua(PGY), John(PGY)",
-    "int_list": "RookieA(Int), RookieB(Int)",
+    "vs_list": "柯P(VS), 怪醫(VS)",
+    "r_list": "洋洋(R3), 蹦蹦(R2)",
+    "pgy_list": "小明(PGY), 小華(PGY), 小強(PGY)",
+    "int_list": "菜鳥A(Int), 菜鳥B(Int)",
     # Hard Constraints (Absolute Leaves)
     "vs_leaves": {}, "r_leaves": {}, "pgy_leaves": {}, "int_leaves": {},
     # Soft Constraints (Wishes/No-Go)
@@ -34,46 +34,46 @@ for key, val in default_state.items():
         st.session_state[key] = val
 
 # --- 3. Sidebar: JSON I/O ---
-st.sidebar.header("📂 Config I/O")
+st.sidebar.header("📂 設定檔存取")
 def get_current_config():
     return {k: st.session_state[k] for k in default_state.keys()}
 
 config_json = json.dumps(get_current_config(), ensure_ascii=False, indent=2)
-st.sidebar.download_button("💾 Download Config (JSON)", config_json, "roster_config.json", "application/json")
+st.sidebar.download_button("💾 下載設定 (JSON)", config_json, "roster_config.json", "application/json")
 
-uploaded_file = st.sidebar.file_uploader("📂 Upload Config (JSON)", type=["json"])
+uploaded_file = st.sidebar.file_uploader("📂 讀取設定 (JSON)", type=["json"])
 if uploaded_file is not None:
     try:
         data = json.load(uploaded_file)
         for key in default_state.keys():
             if key in data:
                 st.session_state[key] = data[key]
-        st.sidebar.success("Config loaded successfully!")
+        st.sidebar.success("讀取成功！")
     except Exception as e:
-        st.sidebar.error(f"Error loading config: {e}")
+        st.sidebar.error(f"讀取失敗: {e}")
 
 st.sidebar.markdown("---")
-st.sidebar.header("📅 Date Settings")
-year = st.sidebar.number_input("Year", min_value=2024, max_value=2030, key="year")
-month = st.sidebar.number_input("Month", min_value=1, max_value=12, key="month")
+st.sidebar.header("📅 時間設定")
+year = st.sidebar.number_input("年份", min_value=2024, max_value=2030, key="year")
+month = st.sidebar.number_input("月份", min_value=1, max_value=12, key="month")
 days_in_month = calendar.monthrange(year, month)[1]
 dates = [d for d in range(1, days_in_month + 1)]
 
 st.sidebar.markdown("---")
-st.sidebar.header("🔢 Solver Settings")
-num_solutions = st.sidebar.slider("Number of Solutions", min_value=1, max_value=5, value=1)
+st.sidebar.header("🔢 運算設定")
+num_solutions = st.sidebar.slider("產生方案數量", min_value=1, max_value=5, value=1)
 
 # --- 4. Staff & Constraints UI ---
-st.subheader("1. Staff & Constraints")
-tab1, tab2 = st.tabs(["🔴 Big Shift (Delivery)", "🔵 Small Shift (General)"])
+st.subheader("1. 人員與限制設定")
+tab1, tab2 = st.tabs(["🔴 大班 (產房)", "🔵 小班 (一般)"])
 with tab1:
     c1, c2 = st.columns(2)
-    vs_staff = [x.strip() for x in st.text_area("VS List", key="vs_list").split(",") if x.strip()]
-    r_staff = [x.strip() for x in st.text_area("R List", key="r_list").split(",") if x.strip()]
+    vs_staff = [x.strip() for x in st.text_area("VS 主治醫師名單", key="vs_list").split(",") if x.strip()]
+    r_staff = [x.strip() for x in st.text_area("R 住院醫師名單", key="r_list").split(",") if x.strip()]
 with tab2:
     c3, c4 = st.columns(2)
-    pgy_staff = [x.strip() for x in st.text_area("PGY List", key="pgy_list").split(",") if x.strip()]
-    int_staff = [x.strip() for x in st.text_area("Intern List", key="int_list").split(",") if x.strip()]
+    pgy_staff = [x.strip() for x in st.text_area("PGY 名單", key="pgy_list").split(",") if x.strip()]
+    int_staff = [x.strip() for x in st.text_area("Intern 實習醫師名單", key="int_list").split(",") if x.strip()]
 
 def update_pref(key, staff, label, help_t):
     prefs = st.session_state.get(key, {})
@@ -86,33 +86,36 @@ def update_pref(key, staff, label, help_t):
         new_prefs[doc] = selection
     st.session_state[key] = new_prefs
 
-with st.expander("⛔️ Absolute Leaves (Hard Constraint)", expanded=True):
+# Absolute Leaves (Hard Constraints)
+with st.expander("⛔️ 請假/未到職設定 (絕對排除)", expanded=True):
+    st.error("注意：此區設定為「硬限制」，系統絕對不會排班。適用於婚喪假、出國、未到職。")
     col_l, col_r = st.columns(2)
     with col_l:
-        update_pref("vs_leaves", vs_staff, "VS Leaves", "Strictly excluded")
-        update_pref("r_leaves", r_staff, "R Leaves", "Strictly excluded")
+        update_pref("vs_leaves", vs_staff, "VS 請假", "")
+        update_pref("r_leaves", r_staff, "R 請假", "")
     with col_r:
-        update_pref("pgy_leaves", pgy_staff, "PGY Leaves", "Strictly excluded")
-        update_pref("int_leaves", int_staff, "Int Leaves", "Strictly excluded")
+        update_pref("pgy_leaves", pgy_staff, "PGY 請假", "")
+        update_pref("int_leaves", int_staff, "Int 請假", "")
 
-st.markdown("#### Preferences (Soft Constraints)")
+# Soft Constraints
+st.markdown("#### 排班意願 (軟限制)")
 c1, c2 = st.columns(2)
 with c1:
-    with st.expander("🔴 Big Shift Prefs", expanded=False):
-        update_pref("vs_wishes", vs_staff, "VS Wishes", "High priority")
-        update_pref("vs_nogo", vs_staff, "VS No-Go", "Try to avoid")
+    with st.expander("🔴 大班意願", expanded=False):
+        update_pref("vs_wishes", vs_staff, "VS 指定值班", "優先排入")
+        update_pref("vs_nogo", vs_staff, "VS 不想值", "盡量避開")
         st.markdown("---")
-        update_pref("r_nogo", r_staff, "R No-Go", "Try to avoid")
-        update_pref("r_wishes", r_staff, "R Wishes", "Bonus points")
+        update_pref("r_nogo", r_staff, "R 不想值", "盡量避開")
+        update_pref("r_wishes", r_staff, "R 想值", "額外加分")
 with c2:
-    with st.expander("🔵 Small Shift Prefs", expanded=False):
-        update_pref("pgy_nogo", pgy_staff, "PGY No-Go", "Try to avoid")
-        update_pref("pgy_wishes", pgy_staff, "PGY Wishes", "Bonus points")
+    with st.expander("🔵 小班意願", expanded=False):
+        update_pref("pgy_nogo", pgy_staff, "PGY 不想值", "盡量避開")
+        update_pref("pgy_wishes", pgy_staff, "PGY 想值", "額外加分")
         st.markdown("---")
-        update_pref("int_nogo", int_staff, "Int No-Go", "Try to avoid")
-        update_pref("int_wishes", int_staff, "Int Wishes", "Bonus points")
+        update_pref("int_nogo", int_staff, "Int 不想值", "盡量避開")
+        update_pref("int_wishes", int_staff, "Int 想值", "額外加分")
 
-# --- 5. Core Algorithms ---
+# --- 5. Core Algorithms (Comments in English for Maintainability) ---
 
 def add_fairness_objective(model, shifts, staff_list, days, obj_terms, weight=500):
     """
@@ -130,7 +133,7 @@ def add_fairness_objective(model, shifts, staff_list, days, obj_terms, weight=50
         # Weekday Fairness
         wd_count = model.NewIntVar(0, 31, f"wd_cnt_{doc}")
         model.Add(wd_count == sum(shifts[(doc, d)] for d in weekday_days))
-        # Deviation calculation: dev >= x - avg AND dev >= avg - x (Absolute value logic)
+        # Deviation calculation
         dev_wd = model.NewIntVar(0, 31, f"dev_wd_{doc}")
         model.Add(dev_wd >= wd_count - avg_wd)
         model.Add(dev_wd >= avg_wd - wd_count)
@@ -167,8 +170,8 @@ def add_point_system_constraint(model, shifts, staff_list, days, obj_terms, sacr
         # Penalize exceeding the limit
         obj_terms.append(slack * -weight)
         
-        # Record sacrifice if limit is exceeded
-        sacrifices.append((slack, f"{doc} Points > {limit} (Wd=1/We=2)"))
+        # Record sacrifice if limit is exceeded (Translate log to Chinese)
+        sacrifices.append((slack, f"{doc} 點數超標 (目前>{limit}點, 平日1/假日2)"))
 
 def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_nogo, r_nogo, r_wishes, forbidden_patterns=None):
     model = cp_model.CpModel()
@@ -182,7 +185,7 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
         for d in days:
             shifts[(doc, d)] = model.NewBoolVar(f"s_big_{doc}_{d}")
 
-    # 1. Coverage: Exactly one doctor per day
+    # 1. Coverage
     for d in days:
         model.Add(sum(shifts[(doc, d)] for doc in all_staff) == 1)
 
@@ -199,51 +202,46 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
         if doc in r_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
 
-    # 4. Diversity Constraint (for multi-solution generation)
+    # 4. Diversity Constraint
     if forbidden_patterns:
         for pattern in forbidden_patterns:
             model.Add(sum([shifts[(doc, d)] for doc, d in pattern]) <= len(pattern) - 3)
 
-    # 5. VS Wishes (Highest Priority Soft Constraint - treated as Hard if possible)
+    # 5. VS Wishes
     for doc, dates_on in vs_wishes.items():
         if doc in vs_staff:
             for d in dates_on:
                 model.Add(shifts[(doc, d)] == 1) 
     
-    # 6. Objective: Fairness (Load Balancing)
+    # 6. Objective: Fairness
     W_FAIRNESS = 2000
     add_fairness_objective(model, shifts, r_staff, days, obj_terms, weight=W_FAIRNESS)
 
-    # 7. [NEW] Point System Limit (<= 8 points)
-    # Apply primarily to Residents (R), VS usually have their own rules but can be added if needed
+    # 7. Point System Limit (<= 8 points)
     add_point_system_constraint(model, shifts, r_staff, days, obj_terms, sacrifices, limit=8, weight=3000)
 
     # 8. Preferences & Penalties
     W_R_NOGO = 200; W_VS_NOGO = 500; W_VS_SUPPORT = 500; W_R_WISH = 10
     
-    # R No-Go
     for doc, dates_off in r_nogo.items():
         if doc in r_staff:
             for d in dates_off:
                 obj_terms.append(shifts[(doc, d)] * -W_R_NOGO)
-                sacrifices.append((shifts[(doc, d)], f"{doc} (R) assigned on No-Go ({month}/{d})"))
+                sacrifices.append((shifts[(doc, d)], f"{doc} (R) 排入 No-Go ({month}/{d})"))
     
-    # VS No-Go
     for doc, dates_off in vs_nogo.items():
         if doc in vs_staff:
             for d in dates_off:
                 obj_terms.append(shifts[(doc, d)] * -W_VS_NOGO)
-                sacrifices.append((shifts[(doc, d)], f"{doc} (VS) assigned on No-Go ({month}/{d})"))
+                sacrifices.append((shifts[(doc, d)], f"{doc} (VS) 排入 No-Go ({month}/{d})"))
 
-    # Penalty for VS supporting non-wish days
     for doc in vs_staff:
         wished_days = vs_wishes.get(doc, [])
         for d in days:
             if d not in wished_days:
                 obj_terms.append(shifts[(doc, d)] * -W_VS_SUPPORT)
-                sacrifices.append((shifts[(doc, d)], f"{doc} (VS) covering extra shift ({month}/{d})"))
+                sacrifices.append((shifts[(doc, d)], f"{doc} (VS) 支援非指定班 ({month}/{d})"))
 
-    # R Wishes
     for doc, dates_on in r_wishes.items():
         if doc in r_staff:
             for d in dates_on:
@@ -316,24 +314,23 @@ def solve_small_shift(pgy_staff, int_staff, days, pgy_leaves, int_leaves, pgy_no
                 slack = model.NewIntVar(0, 7, f"slk_wk_{doc}_{week[0]}")
                 model.Add(count <= 2 + slack)
                 obj_terms.append(slack * -limit_weight)
-                sacrifices.append((slack, f"{doc} >2 shifts/week"))
+                sacrifices.append((slack, f"{doc} 單週超過 2 班"))
 
         # Monthly Weekday Limit: <= 6
         wd_cnt = sum(shifts[(doc, d)] for d in weekday_days)
         slack_wd = model.NewIntVar(0, 31, f"slk_wd_{doc}")
         model.Add(wd_cnt <= 6 + slack_wd)
         obj_terms.append(slack_wd * -limit_weight)
-        sacrifices.append((slack_wd, f"{doc} >6 weekday shifts"))
+        sacrifices.append((slack_wd, f"{doc} 平日超過 6 班"))
 
         # Monthly Weekend Limit: <= 2
         we_cnt = sum(shifts[(doc, d)] for d in weekend_days)
         slack_we = model.NewIntVar(0, 31, f"slk_we_{doc}")
         model.Add(we_cnt <= 2 + slack_we)
         obj_terms.append(slack_we * -limit_weight)
-        sacrifices.append((slack_we, f"{doc} >2 weekend shifts"))
+        sacrifices.append((slack_we, f"{doc} 假日超過 2 班"))
 
-    # 6. [NEW] Point System Limit (<= 8 points)
-    # Applied to both PGY and Interns
+    # 6. Point System Limit (<= 8 points)
     add_point_system_constraint(model, shifts, all_staff, days, obj_terms, sacrifices, limit=8, weight=3000)
 
     # 7. Fairness Objective
@@ -347,7 +344,7 @@ def solve_small_shift(pgy_staff, int_staff, days, pgy_leaves, int_leaves, pgy_no
         for d in days:
             if d in nogo_list:
                 obj_terms.append(shifts[(doc, d)] * -W_NOGO)
-                sacrifices.append((shifts[(doc, d)], f"{doc} assigned on No-Go ({month}/{d})"))
+                sacrifices.append((shifts[(doc, d)], f"{doc} 排入不想值的班 ({month}/{d})"))
             if d in wish_list:
                 obj_terms.append(shifts[(doc, d)] * W_WISH)
 
@@ -374,17 +371,18 @@ def get_doctor_color(name):
 
 def calculate_stats(df):
     if df.empty: return pd.DataFrame()
-    stats = df.groupby('Doctor')['Type'].value_counts().unstack(fill_value=0)
-    if 'Weekday' not in stats.columns: stats['Weekday'] = 0
-    if 'Weekend' not in stats.columns: stats['Weekend'] = 0
-    stats['Total Shifts'] = stats['Weekday'] + stats['Weekend']
-    stats['Total Points'] = stats['Weekday'] * 1 + stats['Weekend'] * 2
-    return stats[['Total Shifts', 'Total Points', 'Weekday', 'Weekend']].sort_values(by='Total Points', ascending=False)
+    stats = df.groupby('醫師')['類型'].value_counts().unstack(fill_value=0)
+    if '平日' not in stats.columns: stats['平日'] = 0
+    if '假日' not in stats.columns: stats['假日'] = 0
+    stats['總班數'] = stats['平日'] + stats['假日']
+    # Calculate Points
+    stats['總點數'] = stats['平日'] * 1 + stats['假日'] * 2
+    return stats[['總班數', '總點數', '平日', '假日']].sort_values(by='總點數', ascending=False)
 
 def get_html_calendar(df_big, df_small):
     cal = calendar.monthcalendar(year, month)
-    map_big = {int(r["Date"].split("/")[1]): r["Doctor"] for _, r in df_big.iterrows()}
-    map_small = {int(r["Date"].split("/")[1]): r["Doctor"] for _, r in df_small.iterrows()}
+    map_big = {int(r["日期"].split("/")[1]): r["醫師"] for _, r in df_big.iterrows()}
+    map_small = {int(r["日期"].split("/")[1]): r["醫師"] for _, r in df_small.iterrows()}
     
     html = """
     <style>
@@ -407,8 +405,8 @@ def get_html_calendar(df_big, df_small):
                 b_doc = map_big.get(day, "")
                 s_doc = map_small.get(day, "")
                 html += f'<td class="{cls}"><div class="day-num">{day}</div>'
-                if b_doc: html += f'<div class="badge" style="background-color:{get_doctor_color(b_doc)};"><span class="shift-label">Big:</span>{b_doc}</div>'
-                if s_doc: html += f'<div class="badge" style="background-color:{get_doctor_color(s_doc)};"><span class="shift-label">Sml:</span>{s_doc}</div>'
+                if b_doc: html += f'<div class="badge" style="background-color:{get_doctor_color(b_doc)};"><span class="shift-label">產:</span>{b_doc}</div>'
+                if s_doc: html += f'<div class="badge" style="background-color:{get_doctor_color(s_doc)};"><span class="shift-label">小:</span>{s_doc}</div>'
                 html += "</td>"
         html += "</tr>"
     html += "</tbody></table>"
@@ -431,16 +429,17 @@ def generate_df(solver, shifts, staff, days, name):
             if solver.Value(shifts[(doc, d)]) == 1:
                 w = date(year, month, d).strftime("%a")
                 is_weekend = date(year, month, d).weekday() >= 5
-                res.append({"Date": f"{month}/{d}", "Weekday": w, "Shift": name, "Doctor": doc, "Type": "Weekend" if is_weekend else "Weekday"})
+                # Translate columns to Chinese for UI display
+                res.append({"日期": f"{month}/{d}", "星期": w, "班別": name, "醫師": doc, "類型": "假日" if is_weekend else "平日"})
     return pd.DataFrame(res)
 
 def generate_excel_calendar_df(df_big, df_small):
-    map_big = {int(r["Date"].split("/")[1]): r["Doctor"] for _, r in df_big.iterrows()}
-    map_small = {int(r["Date"].split("/")[1]): r["Doctor"] for _, r in df_small.iterrows()}
+    map_big = {int(r["日期"].split("/")[1]): r["醫師"] for _, r in df_big.iterrows()}
+    map_small = {int(r["日期"].split("/")[1]): r["醫師"] for _, r in df_small.iterrows()}
     
     cal = calendar.monthcalendar(year, month)
     csv_rows = []
-    headers = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+    headers = ['週一', '週二', '週三', '週四', '週五', '週六', '週日']
     csv_rows.append(headers)
     
     for week in cal:
@@ -450,8 +449,8 @@ def generate_excel_calendar_df(df_big, df_small):
                 row_date.append(""); row_big.append(""); row_small.append("")
             else:
                 row_date.append(f"{month}/{day}")
-                row_big.append(f"[Big] {map_big.get(day, '')}")
-                row_small.append(f"[Sml] {map_small.get(day, '')}")
+                row_big.append(f"[產] {map_big.get(day, '')}")
+                row_small.append(f"[小] {map_small.get(day, '')}")
         csv_rows.append(row_date); csv_rows.append(row_big); csv_rows.append(row_small)
         csv_rows.append([""] * 7)
         
@@ -459,11 +458,11 @@ def generate_excel_calendar_df(df_big, df_small):
 
 # --- 7. Main Execution ---
 st.markdown("---")
-st.caption("Generate N different feasible solutions. Toggle tabs to compare.")
+st.caption("系統將產生 N 組不同的方案供您選擇")
 
-if st.button(f"🚀 Generate {num_solutions} Solutions", type="primary"):
+if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="primary"):
     if not (vs_staff and r_staff and pgy_staff and int_staff):
-        st.error("Error: Staff lists cannot be empty.")
+        st.error("錯誤：醫師名單不能為空！")
     else:
         big_solutions = []
         small_solutions = []
@@ -472,7 +471,7 @@ if st.button(f"🚀 Generate {num_solutions} Solutions", type="primary"):
         progress = st.empty()
         
         for i in range(num_solutions):
-            progress.text(f"Solving... ({i+1}/{num_solutions})")
+            progress.text(f"運算中... ({i+1}/{num_solutions})")
             
             # Solve Big Shift
             b_sol, b_stat, b_shifts, b_sac, b_pat = solve_big_shift(
@@ -503,44 +502,44 @@ if st.button(f"🚀 Generate {num_solutions} Solutions", type="primary"):
         progress.empty()
         
         if not big_solutions or not small_solutions:
-            st.error("No feasible solution found. Please reduce absolute leave constraints.")
+            st.error("無法找出可行解！請嘗試減少「絕對請假」的日期。")
         else:
-            st.success(f"Successfully generated {min(len(big_solutions), len(small_solutions))} solutions!")
-            tabs = st.tabs([f"Solution {i+1}" for i in range(min(len(big_solutions), len(small_solutions)))])
+            st.success(f"成功生成 {min(len(big_solutions), len(small_solutions))} 組方案！")
+            tabs = st.tabs([f"方案 {i+1}" for i in range(min(len(big_solutions), len(small_solutions)))])
             
             for i, tab in enumerate(tabs):
                 with tab:
                     b_data = big_solutions[i]
                     s_data = small_solutions[i]
                     
-                    df_big = generate_df(b_data[0], b_data[1], vs_staff+r_staff, dates, "Big")
-                    df_small = generate_df(s_data[0], s_data[1], pgy_staff+int_staff, dates, "Small")
+                    df_big = generate_df(b_data[0], b_data[1], vs_staff+r_staff, dates, "大班")
+                    df_small = generate_df(s_data[0], s_data[1], pgy_staff+int_staff, dates, "小班")
                     
                     sac_big = get_report(b_data[0], b_data[2])
                     sac_small = get_report(s_data[0], s_data[2])
                     
                     if sac_big or sac_small:
-                        with st.expander("⚠️ Sacrifice Report (Points/Constraints Exceeded)", expanded=True):
+                        with st.expander("⚠️ 犧牲報告 (點數超標/違反意願)", expanded=True):
                             if sac_big: 
-                                st.write("**[Big Shift]**")
+                                st.write("**[大班 (產房)]**")
                                 for s in sac_big: st.write(f"- 🔴 {s}")
                             if sac_small: 
-                                st.write("**[Small Shift]**")
+                                st.write("**[小班 (一般)]**")
                                 for s in sac_small: st.write(f"- 🔵 {s}")
                     else:
-                        st.info("✨ Perfect Solution")
+                        st.info("✨ 完美方案 (無犧牲)")
 
                     c1, c2 = st.columns(2)
                     with c1: 
-                        st.markdown("**Big Shift Stats**")
+                        st.markdown("**大班統計**")
                         st.dataframe(calculate_stats(df_big), use_container_width=True)
                     with c2: 
-                        st.markdown("**Small Shift Stats**")
+                        st.markdown("**小班統計**")
                         st.dataframe(calculate_stats(df_small), use_container_width=True)
 
                     st.markdown(get_html_calendar(df_big, df_small), unsafe_allow_html=True)
                     
-                    # Excel Format CSV
+                    # Excel Format CSV (Chinese)
                     excel_df = generate_excel_calendar_df(df_big, df_small)
                     csv = excel_df.to_csv(index=False, header=False).encode('utf-8-sig')
-                    st.download_button(f"📥 Download Excel-Format CSV", csv, f"roster_cal_{i+1}.csv", "text/csv", key=f"dl_{i}")
+                    st.download_button(f"📥 下載 Excel 日曆格式 (CSV)", csv, f"roster_cal_{i+1}.csv", "text/csv", key=f"dl_{i}")
