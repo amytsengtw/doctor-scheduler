@@ -547,3 +547,118 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
                     excel_df = generate_excel_calendar_df(df_big, df_small)
                     csv = excel_df.to_csv(index=False, header=False).encode('utf-8-sig')
                     st.download_button(f"📥 下載 Excel 日曆格式 (CSV)", csv, f"roster_cal_{i+1}.csv", "text/csv", key=f"dl_{i}")
+# ==========================================
+# 6. 主程式執行 (這段程式碼一定要靠最左邊，不能有縮排)
+# ==========================================
+st.markdown("---")
+st.caption(f"目前設定將產生 {num_solutions} 組方案供您選擇")
+
+# 按鈕在這裡 👇
+if st.button("🚀 開始排班", type="primary"):
+    if not (vs_staff and r_staff and pgy_staff and int_staff):
+        st.error("錯誤：醫師名單不能為空！請確認人員設定分頁。")
+    else:
+        big_solutions = []
+        small_solutions = []
+        forbidden_big = []
+        forbidden_small = []
+        
+        # 建立進度條與文字
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i in range(num_solutions):
+            # 更新進度
+            progress = (i + 1) / num_solutions
+            progress_bar.progress(progress)
+            status_text.text(f"正在運算第 {i+1} / {num_solutions} 個方案... (正在嘗試找出最佳解)")
+            
+            # 1. 解大班 (Big Shift)
+            b_sol, b_stat, b_shifts, b_sac, b_pat, r_schedule_map = solve_big_shift(
+                vs_staff, r_staff, dates, 
+                st.session_state.vs_leaves, st.session_state.r_leaves,
+                st.session_state.vs_wishes, st.session_state.vs_nogo, 
+                st.session_state.r_nogo, st.session_state.r_wishes,
+                forbidden_patterns=forbidden_big
+            )
+            
+            # 2. 解小班 (Small Shift - 帶入 R 支援資訊)
+            s_sol, s_stat, s_shifts, s_sac, s_pat = solve_small_shift(
+                pgy_staff, int_staff, r_staff, dates, 
+                st.session_state.pgy_leaves, st.session_state.int_leaves,
+                st.session_state.pgy_nogo, st.session_state.pgy_wishes, 
+                st.session_state.int_nogo, st.session_state.int_wishes,
+                st.session_state.r_nogo, r_schedule_map, 
+                forbidden_patterns=forbidden_small
+            )
+
+            # 儲存成功結果
+            if b_stat in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+                big_solutions.append((b_sol, b_shifts, b_sac))
+                forbidden_big.append(b_pat)
+            
+            if s_stat in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+                small_solutions.append((s_sol, s_shifts, s_sac))
+                forbidden_small.append(s_pat)
+
+        # 清除進度條
+        status_text.empty()
+        progress_bar.empty()
+        
+        if not big_solutions or not small_solutions:
+            st.error("❌ 無法找出可行解！")
+            st.warning("建議檢查：\n1. 是否有太多人同時請假 (絕對排除)？\n2. 實習醫師人數是否太少？")
+        else:
+            st.success(f"✅ 運算完成！成功生成 {min(len(big_solutions), len(small_solutions))} 組方案。")
+            st.balloons()
+            
+            # 建立分頁
+            tabs = st.tabs([f"方案 {i+1}" for i in range(min(len(big_solutions), len(small_solutions)))])
+            
+            for i, tab in enumerate(tabs):
+                with tab:
+                    b_data = big_solutions[i]
+                    s_data = small_solutions[i]
+                    
+                    # 產生表格資料
+                    df_big = generate_df(b_data[0], b_data[1], vs_staff+r_staff, dates, "大班")
+                    df_small = generate_df(s_data[0], s_data[1], pgy_staff+int_staff+r_staff, dates, "小班")
+                    
+                    sac_big = get_report(b_data[0], b_data[2])
+                    sac_small = get_report(s_data[0], s_data[2])
+                    
+                    # 顯示犧牲報告
+                    if sac_big or sac_small:
+                        with st.expander("⚠️ 犧牲報告 (點數超標/違反意願/R支援)", expanded=True):
+                            if sac_big: 
+                                st.write("**[大班 (產房)]**")
+                                for s in sac_big: st.write(f"- 🔴 {s}")
+                            if sac_small: 
+                                st.write("**[小班 (一般)]**")
+                                for s in sac_small: st.write(f"- 🔵 {s}")
+                    else:
+                        st.info("✨ 完美方案 (無犧牲)")
+
+                    # 顯示統計
+                    c1, c2 = st.columns(2)
+                    with c1: 
+                        st.markdown("### 大班統計")
+                        st.dataframe(calculate_stats(df_big), use_container_width=True)
+                    with c2: 
+                        st.markdown("### 小班統計 (含 R 支援)")
+                        st.dataframe(calculate_stats(df_small), use_container_width=True)
+
+                    # 顯示月曆
+                    st.markdown("### 📅 排班月曆")
+                    st.markdown(get_html_calendar(df_big, df_small), unsafe_allow_html=True)
+                    
+                    # 下載按鈕
+                    excel_df = generate_excel_calendar_df(df_big, df_small)
+                    csv = excel_df.to_csv(index=False, header=False).encode('utf-8-sig')
+                    st.download_button(
+                        label=f"📥 下載 Excel 日曆格式 (方案 {i+1})",
+                        data=csv,
+                        file_name=f"roster_solution_{i+1}.csv",
+                        mime="text/csv",
+                        key=f"dl_{i}"
+                    )
