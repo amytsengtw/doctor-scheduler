@@ -21,7 +21,6 @@ def get_doctor_color(name):
     return palette[idx]
 
 def generate_ics_content(schedule_data, year, month):
-    """用於生成 .ics 檔案內容"""
     ics = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//CTH//Roster//TW\nCALSCALE:GREGORIAN\n"
     for item in schedule_data:
         day = item['d']
@@ -34,12 +33,8 @@ def generate_ics_content(schedule_data, year, month):
     ics += "END:VCALENDAR"
     return ics
 
-# ==========================================
-# 1. 路由判斷 (醫師檢視 vs 總醫師管理)
-# ==========================================
 query_params = st.query_params
 if "payload" in query_params:
-    # --- [模式 A] 醫師個人檢視模式 ---
     try:
         payload = query_params["payload"]
         json_str = base64.b64decode(payload).decode('utf-8')
@@ -75,11 +70,7 @@ if "payload" in query_params:
     except Exception as e:
         st.error("連結無效或已過期。")
     
-    st.stop() # 停止執行後續程式碼，只顯示個人頁面
-
-# ==========================================
-# [模式 B] 總醫師管理模式 (Admin View)
-# ==========================================
+    st.stop()
 
 st.title("🏥 耕莘醫院婦產科雙軌排班系統 (v6.2)")
 st.caption("修復版：預設網址更新 | 功能：魔術連結分發 + 點數制 + R救援")
@@ -104,7 +95,6 @@ for key, val in default_state.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
-# --- 側邊欄設定 ---
 st.sidebar.header("📂 設定檔存取")
 def get_current_config():
     return {k: st.session_state[k] for k in default_state.keys()}
@@ -144,13 +134,11 @@ st.sidebar.markdown("---")
 st.sidebar.header("🔢 運算設定")
 num_solutions = st.sidebar.slider("產生方案數量", min_value=1, max_value=5, value=1)
 
-# === [修改] 這裡預設您的正確網址 ===
 base_app_url = st.sidebar.text_input(
     "🔗 App 網址 (用於連結)", 
     value="https://doctor-scheduler-fkbdrtumuypcmcedntjvts.streamlit.app"
 )
 
-# --- 主畫面 UI ---
 st.subheader("1. 人員與限制設定")
 tab1, tab2 = st.tabs(["🔴 大班 (產房)", "🔵 小班 (一般)"])
 with tab1:
@@ -199,7 +187,6 @@ with c2:
         update_pref("int_nogo", int_staff, "Int 不想值", "避開")
         update_pref("int_wishes", int_staff, "Int 想值", "加分")
 
-# --- 演算法與輔助函式定義區 ---
 
 def is_holiday(d, custom_holidays):
     return (date(year, month, d).weekday() >= 5) or (d in custom_holidays)
@@ -455,9 +442,6 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days, pgy_leaves, int_leave
                 if solver.Value(shifts[(doc, d)]) == 1: result_pattern.append((doc, d))
     return solver, status, shifts, sacrifices, result_pattern
 
-# ==========================================
-# 7. 主程式執行
-# ==========================================
 st.markdown("---")
 st.caption(f"目前設定將產生 {num_solutions} 組方案供您選擇")
 
@@ -535,7 +519,6 @@ if st.button("🚀 開始排班", type="primary"):
 
                     st.markdown(get_html_calendar(df_big, df_small, st.session_state.holidays), unsafe_allow_html=True)
                     
-                    # 連結分發區
                     st.markdown("#### 🔗 分發連結")
                     all_docs = pd.concat([df_big['醫師'], df_small['醫師']]).unique()
                     with st.expander("點擊展開所有醫師連結"):
