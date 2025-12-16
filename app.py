@@ -7,13 +7,16 @@ import json
 import hashlib
 
 # ==========================================
-# 1. 頁面設定與 Session State
+# 1. 頁面設定
 # ==========================================
-st.set_page_config(page_title="耕莘醫院雙軌排班系統 (v4.5)", layout="wide")
+st.set_page_config(page_title="耕莘醫院雙軌排班系統 (v4.6)", layout="wide")
 
-st.title("🏥 耕莘醫院婦產科雙軌排班系統 (v4.5)")
-st.caption("救援機制調整：PGY/Int 點數 > 10 點才啟動 R 支援 | 平日=1點, 假日=2點")
+st.title("🏥 耕莘醫院婦產科雙軌排班系統 (v4.6)")
+st.caption("修復版：確保按鈕顯示 | 救援機制：PGY/Int > 10 點啟動 R 支援")
 
+# ==========================================
+# 2. Session State 初始化
+# ==========================================
 default_state = {
     "year": 2025,
     "month": 12,
@@ -33,7 +36,7 @@ for key, val in default_state.items():
         st.session_state[key] = val
 
 # ==========================================
-# 2. 側邊欄設定
+# 3. 側邊欄設定
 # ==========================================
 st.sidebar.header("📂 設定檔存取")
 def get_current_config():
@@ -65,7 +68,7 @@ st.sidebar.header("🔢 運算設定")
 num_solutions = st.sidebar.slider("產生方案數量", min_value=1, max_value=5, value=1)
 
 # ==========================================
-# 3. 人員與限制介面
+# 4. 主畫面：人員與限制設定
 # ==========================================
 st.subheader("1. 人員與限制設定")
 tab1, tab2 = st.tabs(["🔴 大班 (產房)", "🔵 小班 (一般)"])
@@ -117,7 +120,7 @@ with c2:
         update_pref("int_wishes", int_staff, "Int 想值", "額外加分")
 
 # ==========================================
-# 4. 核心演算法
+# 5. 核心演算法定義 (Functions)
 # ==========================================
 
 def add_fairness_objective(model, shifts, staff_list, days, obj_terms, weight=500):
@@ -174,12 +177,16 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
         for d in days:
             shifts[(doc, d)] = model.NewBoolVar(f"s_big_{doc}_{d}")
 
-    # Coverage & Hard Constraints
+    # Coverage
     for d in days:
         model.Add(sum(shifts[(doc, d)] for doc in all_staff) == 1)
+    
+    # Recovery
     for doc in all_staff:
         for d in range(1, len(days)):
              model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
+    
+    # Hard Leaves
     for doc, dates_off in vs_leaves.items():
         if doc in vs_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
@@ -187,6 +194,7 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
         if doc in r_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
 
+    # Diversity
     if forbidden_patterns:
         for pattern in forbidden_patterns:
             model.Add(sum([shifts[(doc, d)] for doc, d in pattern]) <= len(pattern) - 3)
@@ -271,27 +279,34 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
     for d in days:
         model.Add(sum(shifts[(doc, d)] for doc in all_small_candidates) == 1)
     
-    # No Back-to-Back
+    # Recovery
     for doc in pgy_staff + int_staff:
         for d in range(1, len(days)):
              model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
 
-    # R Support Constraints
+    # R Support Constraints (Hard)
     for doc in r_staff:
         big_shift_days = r_schedule_map.get(doc, [])
         r_nogo_days = r_nogo.get(doc, [])
         for d in days:
+            # Rule 1: No simultaneous
             if d in big_shift_days: model.Add(shifts[(doc, d)] == 0)
+            
+            # Rule 2: Q3 Spacing from Big Shift
             is_too_close = False
             for b_day in big_shift_days:
                 if abs(b_day - d) <= 2: 
                     is_too_close = True
                     break
             if is_too_close: model.Add(shifts[(doc, d)] == 0)
+
+            # Rule 3: No-Go protection
             if d in r_nogo_days: model.Add(shifts[(doc, d)] == 0)
+            
+            # Rule 4: No back-to-back support
             if d < len(days): model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
 
-    # Absolute Leaves
+    # Hard Leaves
     for doc, dates_off in pgy_leaves.items():
         if doc in pgy_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
@@ -313,10 +328,11 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
 
     W_LIMIT_BREAK = 5000; W_FAIRNESS = 1000; W_NOGO = 5000; W_WISH = 10
     
-    # Limits
+    # Limits (Intern/PGY)
     for doc in pgy_staff + int_staff:
         is_intern = doc in int_staff
         limit_weight = W_LIMIT_BREAK if is_intern else (W_LIMIT_BREAK / 2)
+
         for week in month_weeks:
             valid_days = [d for d in week if d != 0]
             if valid_days:
@@ -325,19 +341,23 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
                 model.Add(count <= 2 + slack)
                 obj_terms.append(slack * -limit_weight)
                 sacrifices.append((slack, f"{doc} 單週超過 2 班"))
+
         wd_cnt = sum(shifts[(doc, d)] for d in weekday_days)
         slack_wd = model.NewIntVar(0, 31, f"slk_wd_{doc}")
         model.Add(wd_cnt <= 6 + slack_wd)
         obj_terms.append(slack_wd * -limit_weight)
         sacrifices.append((slack_wd, f"{doc} 平日超過 6 班"))
+
         we_cnt = sum(shifts[(doc, d)] for d in weekend_days)
         slack_we = model.NewIntVar(0, 31, f"slk_we_{doc}")
         model.Add(we_cnt <= 2 + slack_we)
         obj_terms.append(slack_we * -limit_weight)
         sacrifices.append((slack_we, f"{doc} 假日超過 2 班"))
 
+    # Point System (Rescue Trigger > 10)
     add_point_system_constraint(model, shifts, pgy_staff + int_staff, days, obj_terms, sacrifices, limit=10, weight=1000)
 
+    # R Support Penalty (Cost 100)
     for doc in r_staff:
         for d in days:
             obj_terms.append(shifts[(doc, d)] * -100)
@@ -364,12 +384,12 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         for doc in all_small_candidates:
             for d in days:
-                if solver.Value(shifts[(doc, d)]) == 1: result_pattern.append((doc, d))
+                if solver.Value(shifts[(doc, d)]) == 1:
+                    result_pattern.append((doc, d))
+                    
     return solver, status, shifts, sacrifices, result_pattern
 
-# ==========================================
-# 5. 視覺化工具
-# ==========================================
+# --- 6. Helper Functions (Visualization) ---
 
 def get_doctor_color(name):
     palette = ["#FFB3BA", "#FFDFBA", "#FFFFBA", "#BAFFC9", "#BAE1FF", "#E6B3FF", "#FFB3E6", "#C9C9FF", "#FFD1DC", "#E0F7FA", "#F0F4C3", "#D7CCC8", "#F8BBD0", "#C5CAE9", "#B2DFDB"]
@@ -460,13 +480,14 @@ def generate_excel_calendar_df(df_big, df_small):
     return pd.DataFrame(csv_rows)
 
 # ==========================================
-# 6. 主程式執行 (確保按鈕在最外層)
+# 7. 主程式執行區塊 (按鈕位置)
 # ==========================================
 st.markdown("---")
-st.caption("系統將產生 N 組不同的方案供您選擇")
+st.caption(f"設定完畢後，請點擊下方按鈕。系統將產生 {num_solutions} 組建議方案。")
 
-# 👇 這是按鈕，一定要在最外層 (沒有縮排)
-if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="primary"):
+# 按鈕在這裡！確保沒有縮排
+if st.button("🚀 開始排班", type="primary"):
+    
     if not (vs_staff and r_staff and pgy_staff and int_staff):
         st.error("錯誤：醫師名單不能為空！")
     else:
@@ -474,11 +495,17 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
         small_solutions = []
         forbidden_big = []
         forbidden_small = []
-        progress = st.empty()
+        
+        # 進度條
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
         for i in range(num_solutions):
-            progress.text(f"運算中... ({i+1}/{num_solutions})")
+            progress = (i + 1) / num_solutions
+            progress_bar.progress(progress)
+            status_text.text(f"正在運算第 {i+1} / {num_solutions} 個方案...")
             
+            # 1. Big Shift
             b_sol, b_stat, b_shifts, b_sac, b_pat, r_schedule_map = solve_big_shift(
                 vs_staff, r_staff, dates, 
                 st.session_state.vs_leaves, st.session_state.r_leaves,
@@ -487,6 +514,7 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
                 forbidden_patterns=forbidden_big
             )
             
+            # 2. Small Shift
             s_sol, s_stat, s_shifts, s_sac, s_pat = solve_small_shift(
                 pgy_staff, int_staff, r_staff, dates, 
                 st.session_state.pgy_leaves, st.session_state.int_leaves,
@@ -504,12 +532,14 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
                 small_solutions.append((s_sol, s_shifts, s_sac))
                 forbidden_small.append(s_pat)
 
-        progress.empty()
+        status_text.empty()
+        progress_bar.empty()
         
         if not big_solutions or not small_solutions:
-            st.error("無法找出可行解！請嘗試減少「絕對請假」的日期。")
+            st.error("❌ 無法找出可行解！請檢查是否設定了太多的「絕對請假」。")
         else:
-            st.success(f"成功生成 {min(len(big_solutions), len(small_solutions))} 組方案！")
+            st.success(f"✅ 成功生成 {min(len(big_solutions), len(small_solutions))} 組方案！")
+            
             tabs = st.tabs([f"方案 {i+1}" for i in range(min(len(big_solutions), len(small_solutions)))])
             
             for i, tab in enumerate(tabs):
@@ -546,119 +576,4 @@ if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="prim
                     
                     excel_df = generate_excel_calendar_df(df_big, df_small)
                     csv = excel_df.to_csv(index=False, header=False).encode('utf-8-sig')
-                    st.download_button(f"📥 下載 Excel 日曆格式 (CSV)", csv, f"roster_cal_{i+1}.csv", "text/csv", key=f"dl_{i}")
-# ==========================================
-# 6. 主程式執行 (這段程式碼一定要靠最左邊，不能有縮排)
-# ==========================================
-st.markdown("---")
-st.caption(f"目前設定將產生 {num_solutions} 組方案供您選擇")
-
-# 按鈕在這裡 👇
-if st.button("🚀 開始排班", type="primary"):
-    if not (vs_staff and r_staff and pgy_staff and int_staff):
-        st.error("錯誤：醫師名單不能為空！請確認人員設定分頁。")
-    else:
-        big_solutions = []
-        small_solutions = []
-        forbidden_big = []
-        forbidden_small = []
-        
-        # 建立進度條與文字
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for i in range(num_solutions):
-            # 更新進度
-            progress = (i + 1) / num_solutions
-            progress_bar.progress(progress)
-            status_text.text(f"正在運算第 {i+1} / {num_solutions} 個方案... (正在嘗試找出最佳解)")
-            
-            # 1. 解大班 (Big Shift)
-            b_sol, b_stat, b_shifts, b_sac, b_pat, r_schedule_map = solve_big_shift(
-                vs_staff, r_staff, dates, 
-                st.session_state.vs_leaves, st.session_state.r_leaves,
-                st.session_state.vs_wishes, st.session_state.vs_nogo, 
-                st.session_state.r_nogo, st.session_state.r_wishes,
-                forbidden_patterns=forbidden_big
-            )
-            
-            # 2. 解小班 (Small Shift - 帶入 R 支援資訊)
-            s_sol, s_stat, s_shifts, s_sac, s_pat = solve_small_shift(
-                pgy_staff, int_staff, r_staff, dates, 
-                st.session_state.pgy_leaves, st.session_state.int_leaves,
-                st.session_state.pgy_nogo, st.session_state.pgy_wishes, 
-                st.session_state.int_nogo, st.session_state.int_wishes,
-                st.session_state.r_nogo, r_schedule_map, 
-                forbidden_patterns=forbidden_small
-            )
-
-            # 儲存成功結果
-            if b_stat in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-                big_solutions.append((b_sol, b_shifts, b_sac))
-                forbidden_big.append(b_pat)
-            
-            if s_stat in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-                small_solutions.append((s_sol, s_shifts, s_sac))
-                forbidden_small.append(s_pat)
-
-        # 清除進度條
-        status_text.empty()
-        progress_bar.empty()
-        
-        if not big_solutions or not small_solutions:
-            st.error("❌ 無法找出可行解！")
-            st.warning("建議檢查：\n1. 是否有太多人同時請假 (絕對排除)？\n2. 實習醫師人數是否太少？")
-        else:
-            st.success(f"✅ 運算完成！成功生成 {min(len(big_solutions), len(small_solutions))} 組方案。")
-            st.balloons()
-            
-            # 建立分頁
-            tabs = st.tabs([f"方案 {i+1}" for i in range(min(len(big_solutions), len(small_solutions)))])
-            
-            for i, tab in enumerate(tabs):
-                with tab:
-                    b_data = big_solutions[i]
-                    s_data = small_solutions[i]
-                    
-                    # 產生表格資料
-                    df_big = generate_df(b_data[0], b_data[1], vs_staff+r_staff, dates, "大班")
-                    df_small = generate_df(s_data[0], s_data[1], pgy_staff+int_staff+r_staff, dates, "小班")
-                    
-                    sac_big = get_report(b_data[0], b_data[2])
-                    sac_small = get_report(s_data[0], s_data[2])
-                    
-                    # 顯示犧牲報告
-                    if sac_big or sac_small:
-                        with st.expander("⚠️ 犧牲報告 (點數超標/違反意願/R支援)", expanded=True):
-                            if sac_big: 
-                                st.write("**[大班 (產房)]**")
-                                for s in sac_big: st.write(f"- 🔴 {s}")
-                            if sac_small: 
-                                st.write("**[小班 (一般)]**")
-                                for s in sac_small: st.write(f"- 🔵 {s}")
-                    else:
-                        st.info("✨ 完美方案 (無犧牲)")
-
-                    # 顯示統計
-                    c1, c2 = st.columns(2)
-                    with c1: 
-                        st.markdown("### 大班統計")
-                        st.dataframe(calculate_stats(df_big), use_container_width=True)
-                    with c2: 
-                        st.markdown("### 小班統計 (含 R 支援)")
-                        st.dataframe(calculate_stats(df_small), use_container_width=True)
-
-                    # 顯示月曆
-                    st.markdown("### 📅 排班月曆")
-                    st.markdown(get_html_calendar(df_big, df_small), unsafe_allow_html=True)
-                    
-                    # 下載按鈕
-                    excel_df = generate_excel_calendar_df(df_big, df_small)
-                    csv = excel_df.to_csv(index=False, header=False).encode('utf-8-sig')
-                    st.download_button(
-                        label=f"📥 下載 Excel 日曆格式 (方案 {i+1})",
-                        data=csv,
-                        file_name=f"roster_solution_{i+1}.csv",
-                        mime="text/csv",
-                        key=f"dl_{i}"
-                    )
+                    st.download_button(f"📥 下載 Excel 日曆格式 (CSV)", csv, f"roster_solution_{i+1}.csv", "text/csv", key=f"dl_{i}")
