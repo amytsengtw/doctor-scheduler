@@ -302,3 +302,247 @@ def generate_excel_calendar_df(df_big, df_small):
         row_date = []; row_big = []; row_small = []
         for day in week:
             if day == 0:
+                row_date.append(""); row_big.append(""); row_small.append("")
+            else:
+                row_date.append(f"{month}/{day}")
+                row_big.append(f"[產] {map_big.get(day, '')}")
+                row_small.append(f"[小] {map_small.get(day, '')}")
+        csv_rows.append(row_date); csv_rows.append(row_big); csv_rows.append(row_small)
+        csv_rows.append([""] * 7)
+    return pd.DataFrame(csv_rows)
+
+def generate_magic_link(base_url, doctor_name, df_big, df_small, year, month):
+    full_df = pd.concat([df_big, df_small])
+    doc_shifts = full_df[full_df['醫師'] == doctor_name]
+    shift_data = []
+    for _, row in doc_shifts.iterrows():
+        day = int(row['日期'].split('/')[1])
+        shift_data.append({'d': day, 't': row['班別']})
+    payload = {'n': doctor_name, 'y': year, 'm': month, 's': shift_data}
+    json_str = json.dumps(payload)
+    b64_str = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+    if base_url.endswith('/'): base_url = base_url[:-1]
+    return f"{base_url}/?payload={b64_str}"
+
+def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_nogo, r_nogo, r_wishes, custom_holidays, forbidden_patterns=None):
+    model = cp_model.CpModel()
+    all_staff = vs_staff + r_staff
+    shifts = {}
+    obj_terms = []
+    sacrifices = []
+    for doc in all_staff:
+        for d in days: shifts[(doc, d)] = model.NewBoolVar(f"s_big_{doc}_{d}")
+    for d in days: model.Add(sum(shifts[(doc, d)] for doc in all_staff) == 1)
+    for doc in all_staff:
+        for d in range(1, len(days)): model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
+    for doc, dates_off in vs_leaves.items():
+        if doc in vs_staff:
+            for d in dates_off: model.Add(shifts[(doc, d)] == 0)
+    for doc, dates_off in r_leaves.items():
+        if doc in r_staff:
+            for d in dates_off: model.Add(shifts[(doc, d)] == 0)
+    if forbidden_patterns:
+        for pattern in forbidden_patterns: model.Add(sum([shifts[(doc, d)] for doc, d in pattern]) <= len(pattern) - 3)
+    for doc, dates_on in vs_wishes.items():
+        if doc in vs_staff:
+            for d in dates_on: model.Add(shifts[(doc, d)] == 1) 
+    add_fairness_objective(model, shifts, r_staff, days, custom_holidays, obj_terms, weight=2000)
+    add_point_system_constraint(model, shifts, r_staff, days, custom_holidays, obj_terms, sacrifices, limit=8, weight=200)
+    add_spacing_preference(model, shifts, r_staff, days, obj_terms, weight=50)
+    for doc, dates_off in r_nogo.items():
+        if doc in r_staff:
+            for d in dates_off: obj_terms.append(shifts[(doc, d)] * -5000); sacrifices.append((shifts[(doc, d)], f"{doc} (R) 排入 No-Go ({month}/{d})"))
+    for doc, dates_off in vs_nogo.items():
+        if doc in vs_staff:
+            for d in dates_off: obj_terms.append(shifts[(doc, d)] * -5000); sacrifices.append((shifts[(doc, d)], f"{doc} (VS) 排入 No-Go ({month}/{d})"))
+    for doc in vs_staff:
+        wished_days = vs_wishes.get(doc, [])
+        for d in days:
+            if d not in wished_days: obj_terms.append(shifts[(doc, d)] * -5000); sacrifices.append((shifts[(doc, d)], f"{doc} (VS) 支援 ({month}/{d})"))
+    for doc, dates_on in r_wishes.items():
+        if doc in r_staff:
+            for d in dates_on: obj_terms.append(shifts[(doc, d)] * 10)
+    model.Maximize(sum(obj_terms))
+    solver = cp_model.CpSolver()
+    solver.parameters.random_seed = len(forbidden_patterns) if forbidden_patterns else 0
+    status = solver.Solve(model)
+    result_pattern = []
+    r_schedule_map = {r: [] for r in r_staff}
+    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        for doc in all_staff:
+            for d in days:
+                if solver.Value(shifts[(doc, d)]) == 1:
+                    result_pattern.append((doc, d))
+                    if doc in r_staff: r_schedule_map[doc].append(d)
+    return solver, status, shifts, sacrifices, result_pattern, r_schedule_map
+
+def solve_small_shift(pgy_staff, int_staff, r_staff, days, pgy_leaves, int_leaves, pgy_nogo, pgy_wishes, int_nogo, int_wishes, r_nogo, r_schedule_map, custom_holidays, forbidden_patterns=None):
+    model = cp_model.CpModel()
+    shifts = {}
+    obj_terms = []
+    sacrifices = []
+    for doc in pgy_staff + int_staff:
+        for d in days: shifts[(doc, d)] = model.NewBoolVar(f"s_sml_{doc}_{d}")
+    for doc in r_staff:
+        for d in days: shifts[(doc, d)] = model.NewBoolVar(f"s_sml_Rsupport_{doc}_{d}")
+    all_small_candidates = pgy_staff + int_staff + r_staff
+    for d in days: model.Add(sum(shifts[(doc, d)] for doc in all_small_candidates) == 1)
+    for doc in pgy_staff + int_staff:
+        for d in range(1, len(days)): model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
+    for doc in r_staff:
+        big_shift_days = r_schedule_map.get(doc, [])
+        r_nogo_days = r_nogo.get(doc, [])
+        for d in days:
+            if d in big_shift_days: model.Add(shifts[(doc, d)] == 0)
+            is_too_close = False
+            for b_day in big_shift_days:
+                if abs(b_day - d) <= 2: is_too_close = True; break
+            if is_too_close: model.Add(shifts[(doc, d)] == 0)
+            if d in r_nogo_days: model.Add(shifts[(doc, d)] == 0)
+            if d < len(days): model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
+    for doc, dates_off in pgy_leaves.items():
+        if doc in pgy_staff:
+            for d in dates_off: model.Add(shifts[(doc, d)] == 0)
+    for doc, dates_off in int_leaves.items():
+        if doc in int_staff:
+            for d in dates_off: model.Add(shifts[(doc, d)] == 0)
+    if forbidden_patterns:
+        for pattern in forbidden_patterns:
+            relevant = []
+            for doc, d in pattern:
+                if (doc, d) in shifts: relevant.append(shifts[(doc, d)])
+            if relevant: model.Add(sum(relevant) <= len(relevant) - 3)
+    weekend_days = [d for d in days if is_holiday(d, custom_holidays)]
+    weekday_days = [d for d in days if not is_holiday(d, custom_holidays)]
+    month_weeks = calendar.monthcalendar(year, month)
+    W_LIMIT_BREAK = 1000000; W_FAIRNESS = 500; W_NOGO = 5000; W_WISH = 10
+    
+    for doc in pgy_staff + int_staff:
+        limit_weight = W_LIMIT_BREAK
+        for week in month_weeks:
+            valid_days = [d for d in week if d != 0]
+            if valid_days:
+                count = sum(shifts[(doc, d)] for d in valid_days)
+                slack = model.NewIntVar(0, 7, f"slk_wk_{doc}_{week[0]}")
+                model.Add(count <= 2 + slack)
+                obj_terms.append(slack * -limit_weight); sacrifices.append((slack, f"{doc} 單週超過 2 班"))
+        wd_cnt = sum(shifts[(doc, d)] for d in weekday_days)
+        slack_wd = model.NewIntVar(0, 31, f"slk_wd_{doc}")
+        model.Add(wd_cnt <= 6 + slack_wd)
+        obj_terms.append(slack_wd * -limit_weight); sacrifices.append((slack_wd, f"{doc} 平日超過 6 班"))
+        we_cnt = sum(shifts[(doc, d)] for d in weekend_days)
+        slack_we = model.NewIntVar(0, 31, f"slk_we_{doc}")
+        model.Add(we_cnt <= 2 + slack_we)
+        obj_terms.append(slack_we * -limit_weight); sacrifices.append((slack_we, f"{doc} 假日超過 2 班"))
+    add_point_system_constraint(model, shifts, pgy_staff + int_staff, days, custom_holidays, obj_terms, sacrifices, limit=10, weight=1000)
+    for doc in r_staff:
+        for d in days: obj_terms.append(shifts[(doc, d)] * -50000); sacrifices.append((shifts[(doc, d)], f"{doc} (R) 支援小班 ({month}/{d})"))
+    add_fairness_objective(model, shifts, pgy_staff + int_staff, days, custom_holidays, obj_terms, weight=W_FAIRNESS)
+    for doc in pgy_staff + int_staff:
+        nogo_list = pgy_nogo.get(doc, []) if doc in pgy_staff else int_nogo.get(doc, [])
+        wish_list = pgy_wishes.get(doc, []) if doc in pgy_staff else int_wishes.get(doc, [])
+        for d in days:
+            if d in nogo_list: obj_terms.append(shifts[(doc, d)] * -W_NOGO); sacrifices.append((shifts[(doc, d)], f"{doc} 排入不想值的班 ({month}/{d})"))
+            if d in wish_list: obj_terms.append(shifts[(doc, d)] * W_WISH)
+    model.Maximize(sum(obj_terms))
+    solver = cp_model.CpSolver()
+    solver.parameters.random_seed = len(forbidden_patterns) if forbidden_patterns else 0
+    status = solver.Solve(model)
+    result_pattern = []
+    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        for doc in all_small_candidates:
+            for d in days:
+                if solver.Value(shifts[(doc, d)]) == 1: result_pattern.append((doc, d))
+    return solver, status, shifts, sacrifices, result_pattern
+
+# ==========================================
+# 7. 主程式執行
+# ==========================================
+st.markdown("---")
+st.caption(f"目前設定將產生 {num_solutions} 組方案供您選擇")
+
+if st.button("🚀 開始排班", type="primary"):
+    if not (vs_staff and r_staff and pgy_staff and int_staff):
+        st.error("錯誤：醫師名單不能為空！")
+    else:
+        big_solutions = []
+        small_solutions = []
+        forbidden_big = []
+        forbidden_small = []
+        progress = st.empty()
+        
+        for i in range(num_solutions):
+            progress.text(f"運算中... ({i+1}/{num_solutions})")
+            
+            b_sol, b_stat, b_shifts, b_sac, b_pat, r_schedule_map = solve_big_shift(
+                vs_staff, r_staff, dates, 
+                st.session_state.vs_leaves, st.session_state.r_leaves,
+                st.session_state.vs_wishes, st.session_state.vs_nogo, 
+                st.session_state.r_nogo, st.session_state.r_wishes,
+                st.session_state.holidays, forbidden_patterns=forbidden_big
+            )
+            
+            s_sol, s_stat, s_shifts, s_sac, s_pat = solve_small_shift(
+                pgy_staff, int_staff, r_staff, dates, 
+                st.session_state.pgy_leaves, st.session_state.int_leaves,
+                st.session_state.pgy_nogo, st.session_state.pgy_wishes, 
+                st.session_state.int_nogo, st.session_state.int_wishes,
+                st.session_state.r_nogo, r_schedule_map, 
+                st.session_state.holidays, forbidden_patterns=forbidden_small
+            )
+
+            if b_stat in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+                big_solutions.append((b_sol, b_shifts, b_sac))
+                forbidden_big.append(b_pat)
+            
+            if s_stat in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+                small_solutions.append((s_sol, s_shifts, s_sac))
+                forbidden_small.append(s_pat)
+
+        progress.empty()
+        
+        if not big_solutions or not small_solutions:
+            st.error("無法找出可行解！請嘗試減少「絕對請假」的日期。")
+        else:
+            st.success(f"✅ 成功生成 {min(len(big_solutions), len(small_solutions))} 組方案！")
+            
+            tabs = st.tabs([f"方案 {i+1}" for i in range(min(len(big_solutions), len(small_solutions)))])
+            
+            for i, tab in enumerate(tabs):
+                with tab:
+                    b_data = big_solutions[i]
+                    s_data = small_solutions[i]
+                    
+                    df_big = generate_df(b_data[0], b_data[1], vs_staff+r_staff, dates, "大班")
+                    df_small = generate_df(s_data[0], s_data[1], pgy_staff+int_staff+r_staff, dates, "小班")
+                    sac_big = get_report(b_data[0], b_data[2])
+                    sac_small = get_report(s_data[0], s_data[2])
+                    
+                    if sac_big or sac_small:
+                        with st.expander("⚠️ 犧牲報告", expanded=True):
+                            if sac_big: st.write("**[大班]**"); [st.write(f"- 🔴 {s}") for s in sac_big]
+                            if sac_small: st.write("**[小班]**"); [st.write(f"- 🔵 {s}") for s in sac_small]
+                    else:
+                        st.info("✨ 完美方案")
+
+                    c1, c2 = st.columns(2)
+                    with c1: 
+                        st.markdown("### 大班統計")
+                        st.dataframe(calculate_stats(df_big, st.session_state.holidays), use_container_width=True)
+                    with c2: 
+                        st.markdown("### 小班統計")
+                        st.dataframe(calculate_stats(df_small, st.session_state.holidays), use_container_width=True)
+
+                    st.markdown(get_html_calendar(df_big, df_small, st.session_state.holidays), unsafe_allow_html=True)
+                    
+                    # 連結分發區
+                    st.markdown("#### 🔗 分發連結")
+                    all_docs = pd.concat([df_big['醫師'], df_small['醫師']]).unique()
+                    with st.expander("點擊展開所有醫師連結"):
+                        for doc in all_docs:
+                            link = generate_magic_link(base_app_url, doc, df_big, df_small, year, month)
+                            st.text_input(f"{doc}", value=link, key=f"link_{i}_{doc}")
+
+                    excel_df = generate_excel_calendar_df(df_big, df_small)
+                    csv = excel_df.to_csv(index=False, header=False).encode('utf-8-sig')
+                    st.download_button(f"📥 下載 Excel 日曆格式 (CSV)", csv, f"roster_cal_{i+1}.csv", "text/csv", key=f"dl_{i}")
