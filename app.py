@@ -9,10 +9,10 @@ import hashlib
 # ==========================================
 # 1. 頁面設定
 # ==========================================
-st.set_page_config(page_title="耕莘醫院雙軌排班系統 (v4.6)", layout="wide")
+st.set_page_config(page_title="耕莘醫院雙軌排班系統 (v4.8)", layout="wide")
 
-st.title("🏥 耕莘醫院婦產科雙軌排班系統 (v4.6)")
-st.caption("修復版：確保按鈕顯示 | 救援機制：PGY/Int > 10 點啟動 R 支援")
+st.title("🏥 耕莘醫院婦產科雙軌排班系統 (v4.8)")
+st.caption("邏輯更新：嚴格鎖定 PGY/Int 班數 (平日<=6, 假日<=2) | 若滿班則強制 R 支援 | 點數可超標")
 
 # ==========================================
 # 2. Session State 初始化
@@ -156,6 +156,8 @@ def add_point_system_constraint(model, shifts, staff_list, days, obj_terms, sacr
                                   sum(shifts[(doc, d)] for d in weekend_days) * 2)
         slack = model.NewIntVar(0, 50, f"slack_pts_{doc}")
         model.Add(total_points <= limit + slack)
+        
+        # Penalize exceeding the limit
         obj_terms.append(slack * -weight)
         sacrifices.append((slack, f"{doc} 點數超標 (>{limit}點)"))
 
@@ -177,16 +179,12 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
         for d in days:
             shifts[(doc, d)] = model.NewBoolVar(f"s_big_{doc}_{d}")
 
-    # Coverage
+    # Coverage & Hard Constraints
     for d in days:
         model.Add(sum(shifts[(doc, d)] for doc in all_staff) == 1)
-    
-    # Recovery
     for doc in all_staff:
         for d in range(1, len(days)):
              model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
-    
-    # Hard Leaves
     for doc, dates_off in vs_leaves.items():
         if doc in vs_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
@@ -194,7 +192,6 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
         if doc in r_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
 
-    # Diversity
     if forbidden_patterns:
         for pattern in forbidden_patterns:
             model.Add(sum([shifts[(doc, d)] for doc, d in pattern]) <= len(pattern) - 3)
@@ -264,7 +261,7 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
     obj_terms = []
     sacrifices = []
 
-    # Variables
+    # 1. Variables
     for doc in pgy_staff + int_staff:
         for d in days:
             shifts[(doc, d)] = model.NewBoolVar(f"s_sml_{doc}_{d}")
@@ -275,38 +272,32 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
 
     all_small_candidates = pgy_staff + int_staff + r_staff
 
-    # Coverage
+    # 3. Coverage
     for d in days:
         model.Add(sum(shifts[(doc, d)] for doc in all_small_candidates) == 1)
     
-    # Recovery
+    # 4. No Back-to-Back (PGY/Int)
     for doc in pgy_staff + int_staff:
         for d in range(1, len(days)):
              model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
 
-    # R Support Constraints (Hard)
+    # 5. R Support Constraints (Hard)
     for doc in r_staff:
         big_shift_days = r_schedule_map.get(doc, [])
         r_nogo_days = r_nogo.get(doc, [])
+        
         for d in days:
-            # Rule 1: No simultaneous
             if d in big_shift_days: model.Add(shifts[(doc, d)] == 0)
-            
-            # Rule 2: Q3 Spacing from Big Shift
             is_too_close = False
             for b_day in big_shift_days:
                 if abs(b_day - d) <= 2: 
                     is_too_close = True
                     break
             if is_too_close: model.Add(shifts[(doc, d)] == 0)
-
-            # Rule 3: No-Go protection
             if d in r_nogo_days: model.Add(shifts[(doc, d)] == 0)
-            
-            # Rule 4: No back-to-back support
             if d < len(days): model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
 
-    # Hard Leaves
+    # 6. Absolute Leaves
     for doc, dates_off in pgy_leaves.items():
         if doc in pgy_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
@@ -314,7 +305,7 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
         if doc in int_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
 
-    # Diversity
+    # 7. Diversity
     if forbidden_patterns:
         for pattern in forbidden_patterns:
             relevant = []
@@ -326,12 +317,18 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
     weekday_days = [d for d in days if date(year, month, d).weekday() < 5]
     month_weeks = calendar.monthcalendar(year, month)
 
-    W_LIMIT_BREAK = 5000; W_FAIRNESS = 1000; W_NOGO = 5000; W_WISH = 10
+    # == WEIGHT TUNING FOR v4.8 (Strict Shift Limits) ==
+    W_LIMIT_BREAK = 1000000  # PGY/Int Shift Count > 6/2 (NUCLEAR PENALTY)
+    W_R_RESCUE    = 50000    # R Rescue (Expensive, but cheaper than breaking limit)
+    W_POINT_LIMIT = 100      # Points > 10 (Allowed, low penalty)
+    W_FAIRNESS    = 500
+    W_NOGO        = 5000     # Preference
+    W_WISH        = 10
     
-    # Limits (Intern/PGY)
+    # 8. Limits (The Hardest Soft Constraints)
     for doc in pgy_staff + int_staff:
-        is_intern = doc in int_staff
-        limit_weight = W_LIMIT_BREAK if is_intern else (W_LIMIT_BREAK / 2)
+        # PGY and Interns share strict limits now
+        limit_weight = W_LIMIT_BREAK
 
         for week in month_weeks:
             valid_days = [d for d in week if d != 0]
@@ -354,20 +351,22 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
         obj_terms.append(slack_we * -limit_weight)
         sacrifices.append((slack_we, f"{doc} 假日超過 2 班"))
 
-    # Point System (Rescue Trigger > 10)
-    add_point_system_constraint(model, shifts, pgy_staff + int_staff, days, obj_terms, sacrifices, limit=10, weight=1000)
+    # 9. Point System (Relaxed)
+    add_point_system_constraint(model, shifts, pgy_staff + int_staff, days, obj_terms, sacrifices, limit=10, weight=W_POINT_LIMIT)
 
-    # R Support Penalty (Cost 100)
+    # 10. R Support Penalty (Expensive, but chosen over limit break)
     for doc in r_staff:
         for d in days:
-            obj_terms.append(shifts[(doc, d)] * -100)
+            obj_terms.append(shifts[(doc, d)] * -W_R_RESCUE)
             sacrifices.append((shifts[(doc, d)], f"{doc} (R) 支援小班 ({month}/{d})"))
 
+    # 11. Fairness & Preferences
     add_fairness_objective(model, shifts, pgy_staff + int_staff, days, obj_terms, weight=W_FAIRNESS)
 
     for doc in pgy_staff + int_staff:
         nogo_list = pgy_nogo.get(doc, []) if doc in pgy_staff else int_nogo.get(doc, [])
         wish_list = pgy_wishes.get(doc, []) if doc in pgy_staff else int_wishes.get(doc, [])
+        
         for d in days:
             if d in nogo_list:
                 obj_terms.append(shifts[(doc, d)] * -W_NOGO)
@@ -389,8 +388,7 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
                     
     return solver, status, shifts, sacrifices, result_pattern
 
-# --- 6. Helper Functions (Visualization) ---
-
+# --- 6. Visualization & Helpers ---
 def get_doctor_color(name):
     palette = ["#FFB3BA", "#FFDFBA", "#FFFFBA", "#BAFFC9", "#BAE1FF", "#E6B3FF", "#FFB3E6", "#C9C9FF", "#FFD1DC", "#E0F7FA", "#F0F4C3", "#D7CCC8", "#F8BBD0", "#C5CAE9", "#B2DFDB"]
     idx = int(hashlib.md5(name.encode()).hexdigest(), 16) % len(palette)
@@ -418,6 +416,7 @@ def get_html_calendar(df_big, df_small):
         .day-num {font-size:12px; color:#666; text-align:right; margin-bottom:5px;}
         .badge {padding:4px 6px; border-radius:6px; font-size:13px; margin-bottom:4px; display:block; font-weight:bold; color: #333; text-shadow: 0 0 2px #fff; border: 1px solid rgba(0,0,0,0.1);}
         .weekend {background-color:#fafafa !important;}
+        .shift-label {font-size: 10px; color: #666; margin-right: 3px;}
     </style>
     <table class="cal-table"><thead><tr><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th style="color:red">Sat</th><th style="color:red">Sun</th></tr></thead><tbody>
     """
@@ -480,12 +479,12 @@ def generate_excel_calendar_df(df_big, df_small):
     return pd.DataFrame(csv_rows)
 
 # ==========================================
-# 7. 主程式執行區塊 (按鈕位置)
+# 7. 主程式執行 (確保按鈕在最外層)
 # ==========================================
 st.markdown("---")
-st.caption(f"設定完畢後，請點擊下方按鈕。系統將產生 {num_solutions} 組建議方案。")
+st.caption(f"目前設定將產生 {num_solutions} 組方案供您選擇")
 
-# 按鈕在這裡！確保沒有縮排
+# 按鈕在這裡 👇
 if st.button("🚀 開始排班", type="primary"):
     
     if not (vs_staff and r_staff and pgy_staff and int_staff):
@@ -576,4 +575,10 @@ if st.button("🚀 開始排班", type="primary"):
                     
                     excel_df = generate_excel_calendar_df(df_big, df_small)
                     csv = excel_df.to_csv(index=False, header=False).encode('utf-8-sig')
-                    st.download_button(f"📥 下載 Excel 日曆格式 (CSV)", csv, f"roster_solution_{i+1}.csv", "text/csv", key=f"dl_{i}")
+                    st.download_button(
+                        label=f"📥 下載 Excel 日曆格式 (CSV)",
+                        data=csv,
+                        file_name=f"roster_solution_{i+1}.csv",
+                        mime="text/csv",
+                        key=f"dl_{i}"
+                    )
