@@ -2,17 +2,17 @@ import streamlit as st
 import pandas as pd
 from ortools.sat.python import cp_model
 import calendar
-from datetime import date
+from datetime import date, timedelta
 import json
 import hashlib
 
 # ==========================================
 # 1. 頁面設定
 # ==========================================
-st.set_page_config(page_title="耕莘醫院雙軌排班系統 (v4.8)", layout="wide")
+st.set_page_config(page_title="耕莘醫院雙軌排班系統 (v5.0 旗艦版)", layout="wide")
 
-st.title("🏥 耕莘醫院婦產科雙軌排班系統 (v4.8)")
-st.caption("邏輯更新：嚴格鎖定 PGY/Int 班數 (平日<=6, 假日<=2) | 若滿班則強制 R 支援 | 點數可超標")
+st.title("🏥 耕莘醫院婦產科雙軌排班系統 (v5.0 貼心旗艦版)")
+st.caption("新增功能：手機行事曆匯入 (.ics) | 國定假日設定 | 公平性圖表 | 嚴格班數限制")
 
 # ==========================================
 # 2. Session State 初始化
@@ -28,7 +28,8 @@ default_state = {
     "vs_wishes": {},  "vs_nogo": {},
     "r_wishes": {},   "r_nogo": {},
     "pgy_wishes": {}, "pgy_nogo": {},
-    "int_wishes": {}, "int_nogo": {}
+    "int_wishes": {}, "int_nogo": {},
+    "holidays": [] # New: 國定假日
 }
 
 for key, val in default_state.items():
@@ -62,6 +63,17 @@ year = st.sidebar.number_input("年份", min_value=2024, max_value=2030, key="ye
 month = st.sidebar.number_input("月份", min_value=1, max_value=12, key="month")
 days_in_month = calendar.monthrange(year, month)[1]
 dates = [d for d in range(1, days_in_month + 1)]
+
+# [New] 國定假日設定
+st.sidebar.markdown("---")
+st.sidebar.header("🏮 國定假日 (紅字)")
+holidays = st.sidebar.multiselect(
+    "請勾選平日放假的日子 (視為假日班)",
+    options=dates,
+    default=st.session_state.get("holidays", []),
+    key="holidays_widget"
+)
+st.session_state["holidays"] = holidays
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔢 運算設定")
@@ -123,10 +135,16 @@ with c2:
 # 5. 核心演算法定義 (Functions)
 # ==========================================
 
-def add_fairness_objective(model, shifts, staff_list, days, obj_terms, weight=500):
+# 判斷是否為假日 (週六日 OR 國定假日)
+def is_holiday(d, custom_holidays):
+    is_weekend = date(year, month, d).weekday() >= 5
+    is_custom = d in custom_holidays
+    return is_weekend or is_custom
+
+def add_fairness_objective(model, shifts, staff_list, days, custom_holidays, obj_terms, weight=500):
     if not staff_list: return
-    weekend_days = [d for d in days if date(year, month, d).weekday() >= 5]
-    weekday_days = [d for d in days if date(year, month, d).weekday() < 5]
+    weekend_days = [d for d in days if is_holiday(d, custom_holidays)]
+    weekday_days = [d for d in days if not is_holiday(d, custom_holidays)]
     
     avg_wd = len(weekday_days) // len(staff_list)
     avg_we = len(weekend_days) // len(staff_list)
@@ -146,9 +164,9 @@ def add_fairness_objective(model, shifts, staff_list, days, obj_terms, weight=50
         model.Add(dev_we >= avg_we - we_count)
         obj_terms.append(dev_we * -weight)
 
-def add_point_system_constraint(model, shifts, staff_list, days, obj_terms, sacrifices, limit=8, weight=1000):
-    weekend_days = [d for d in days if date(year, month, d).weekday() >= 5]
-    weekday_days = [d for d in days if date(year, month, d).weekday() < 5]
+def add_point_system_constraint(model, shifts, staff_list, days, custom_holidays, obj_terms, sacrifices, limit=8, weight=1000):
+    weekend_days = [d for d in days if is_holiday(d, custom_holidays)]
+    weekday_days = [d for d in days if not is_holiday(d, custom_holidays)]
 
     for doc in staff_list:
         total_points = model.NewIntVar(0, 100, f"pts_{doc}")
@@ -157,7 +175,6 @@ def add_point_system_constraint(model, shifts, staff_list, days, obj_terms, sacr
         slack = model.NewIntVar(0, 50, f"slack_pts_{doc}")
         model.Add(total_points <= limit + slack)
         
-        # Penalize exceeding the limit
         obj_terms.append(slack * -weight)
         sacrifices.append((slack, f"{doc} 點數超標 (>{limit}點)"))
 
@@ -168,7 +185,7 @@ def add_spacing_preference(model, shifts, staff_list, days, obj_terms, weight=10
             model.Add(shifts[(doc, d)] + shifts[(doc, d+2)] <= 1 + q2_violation)
             obj_terms.append(q2_violation * -weight)
 
-def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_nogo, r_nogo, r_wishes, forbidden_patterns=None):
+def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_nogo, r_nogo, r_wishes, custom_holidays, forbidden_patterns=None):
     model = cp_model.CpModel()
     all_staff = vs_staff + r_staff
     shifts = {}
@@ -179,7 +196,6 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
         for d in days:
             shifts[(doc, d)] = model.NewBoolVar(f"s_big_{doc}_{d}")
 
-    # Coverage & Hard Constraints
     for d in days:
         model.Add(sum(shifts[(doc, d)] for doc in all_staff) == 1)
     for doc in all_staff:
@@ -196,36 +212,30 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
         for pattern in forbidden_patterns:
             model.Add(sum([shifts[(doc, d)] for doc, d in pattern]) <= len(pattern) - 3)
 
-    # VS Wishes
     for doc, dates_on in vs_wishes.items():
         if doc in vs_staff:
             for d in dates_on: model.Add(shifts[(doc, d)] == 1) 
     
-    # Objectives
-    add_fairness_objective(model, shifts, r_staff, days, obj_terms, weight=2000)
-    add_point_system_constraint(model, shifts, r_staff, days, obj_terms, sacrifices, limit=8, weight=200)
+    add_fairness_objective(model, shifts, r_staff, days, custom_holidays, obj_terms, weight=2000)
+    add_point_system_constraint(model, shifts, r_staff, days, custom_holidays, obj_terms, sacrifices, limit=8, weight=200)
     add_spacing_preference(model, shifts, r_staff, days, obj_terms, weight=50)
 
-    # Preferences
     for doc, dates_off in r_nogo.items():
         if doc in r_staff:
             for d in dates_off:
                 obj_terms.append(shifts[(doc, d)] * -5000)
                 sacrifices.append((shifts[(doc, d)], f"{doc} (R) 排入 No-Go ({month}/{d})"))
-    
     for doc, dates_off in vs_nogo.items():
         if doc in vs_staff:
             for d in dates_off:
                 obj_terms.append(shifts[(doc, d)] * -5000)
                 sacrifices.append((shifts[(doc, d)], f"{doc} (VS) 排入 No-Go ({month}/{d})"))
-
     for doc in vs_staff:
         wished_days = vs_wishes.get(doc, [])
         for d in days:
             if d not in wished_days:
                 obj_terms.append(shifts[(doc, d)] * -5000)
                 sacrifices.append((shifts[(doc, d)], f"{doc} (VS) 支援非指定班 ({month}/{d})"))
-
     for doc, dates_on in r_wishes.items():
         if doc in r_staff:
             for d in dates_on:
@@ -252,7 +262,7 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
 def solve_small_shift(pgy_staff, int_staff, r_staff, days, 
                       pgy_leaves, int_leaves, 
                       pgy_nogo, pgy_wishes, int_nogo, int_wishes,
-                      r_nogo, r_schedule_map, 
+                      r_nogo, r_schedule_map, custom_holidays,
                       forbidden_patterns=None):
     
     model = cp_model.CpModel()
@@ -261,31 +271,25 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
     obj_terms = []
     sacrifices = []
 
-    # 1. Variables
     for doc in pgy_staff + int_staff:
         for d in days:
             shifts[(doc, d)] = model.NewBoolVar(f"s_sml_{doc}_{d}")
-
     for doc in r_staff:
         for d in days:
             shifts[(doc, d)] = model.NewBoolVar(f"s_sml_Rsupport_{doc}_{d}")
 
     all_small_candidates = pgy_staff + int_staff + r_staff
 
-    # 3. Coverage
     for d in days:
         model.Add(sum(shifts[(doc, d)] for doc in all_small_candidates) == 1)
     
-    # 4. No Back-to-Back (PGY/Int)
     for doc in pgy_staff + int_staff:
         for d in range(1, len(days)):
              model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
 
-    # 5. R Support Constraints (Hard)
     for doc in r_staff:
         big_shift_days = r_schedule_map.get(doc, [])
         r_nogo_days = r_nogo.get(doc, [])
-        
         for d in days:
             if d in big_shift_days: model.Add(shifts[(doc, d)] == 0)
             is_too_close = False
@@ -297,7 +301,6 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
             if d in r_nogo_days: model.Add(shifts[(doc, d)] == 0)
             if d < len(days): model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
 
-    # 6. Absolute Leaves
     for doc, dates_off in pgy_leaves.items():
         if doc in pgy_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
@@ -305,7 +308,6 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
         if doc in int_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
 
-    # 7. Diversity
     if forbidden_patterns:
         for pattern in forbidden_patterns:
             relevant = []
@@ -313,21 +315,14 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
                 if (doc, d) in shifts: relevant.append(shifts[(doc, d)])
             if relevant: model.Add(sum(relevant) <= len(relevant) - 3)
 
-    weekend_days = [d for d in days if date(year, month, d).weekday() >= 5]
-    weekday_days = [d for d in days if date(year, month, d).weekday() < 5]
+    # Logic update for Holidays
+    weekend_days = [d for d in days if is_holiday(d, custom_holidays)]
+    weekday_days = [d for d in days if not is_holiday(d, custom_holidays)]
     month_weeks = calendar.monthcalendar(year, month)
 
-    # == WEIGHT TUNING FOR v4.8 (Strict Shift Limits) ==
-    W_LIMIT_BREAK = 1000000  # PGY/Int Shift Count > 6/2 (NUCLEAR PENALTY)
-    W_R_RESCUE    = 50000    # R Rescue (Expensive, but cheaper than breaking limit)
-    W_POINT_LIMIT = 100      # Points > 10 (Allowed, low penalty)
-    W_FAIRNESS    = 500
-    W_NOGO        = 5000     # Preference
-    W_WISH        = 10
+    W_LIMIT_BREAK = 1000000; W_FAIRNESS = 500; W_NOGO = 5000; W_WISH = 10
     
-    # 8. Limits (The Hardest Soft Constraints)
     for doc in pgy_staff + int_staff:
-        # PGY and Interns share strict limits now
         limit_weight = W_LIMIT_BREAK
 
         for week in month_weeks:
@@ -351,22 +346,18 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
         obj_terms.append(slack_we * -limit_weight)
         sacrifices.append((slack_we, f"{doc} 假日超過 2 班"))
 
-    # 9. Point System (Relaxed)
-    add_point_system_constraint(model, shifts, pgy_staff + int_staff, days, obj_terms, sacrifices, limit=10, weight=W_POINT_LIMIT)
+    add_point_system_constraint(model, shifts, pgy_staff + int_staff, days, custom_holidays, obj_terms, sacrifices, limit=10, weight=1000)
 
-    # 10. R Support Penalty (Expensive, but chosen over limit break)
     for doc in r_staff:
         for d in days:
-            obj_terms.append(shifts[(doc, d)] * -W_R_RESCUE)
+            obj_terms.append(shifts[(doc, d)] * -50000)
             sacrifices.append((shifts[(doc, d)], f"{doc} (R) 支援小班 ({month}/{d})"))
 
-    # 11. Fairness & Preferences
-    add_fairness_objective(model, shifts, pgy_staff + int_staff, days, obj_terms, weight=W_FAIRNESS)
+    add_fairness_objective(model, shifts, pgy_staff + int_staff, days, custom_holidays, obj_terms, weight=W_FAIRNESS)
 
     for doc in pgy_staff + int_staff:
         nogo_list = pgy_nogo.get(doc, []) if doc in pgy_staff else int_nogo.get(doc, [])
         wish_list = pgy_wishes.get(doc, []) if doc in pgy_staff else int_wishes.get(doc, [])
-        
         for d in days:
             if d in nogo_list:
                 obj_terms.append(shifts[(doc, d)] * -W_NOGO)
@@ -394,16 +385,20 @@ def get_doctor_color(name):
     idx = int(hashlib.md5(name.encode()).hexdigest(), 16) % len(palette)
     return palette[idx]
 
-def calculate_stats(df):
+def calculate_stats(df, custom_holidays):
     if df.empty: return pd.DataFrame()
-    stats = df.groupby('醫師')['類型'].value_counts().unstack(fill_value=0)
+    
+    # Recalculate type based on holidays
+    df['Type'] = df['日期'].apply(lambda x: '假日' if is_holiday(int(x.split('/')[1]), custom_holidays) else '平日')
+    
+    stats = df.groupby('醫師')['Type'].value_counts().unstack(fill_value=0)
     if '平日' not in stats.columns: stats['平日'] = 0
     if '假日' not in stats.columns: stats['假日'] = 0
     stats['總班數'] = stats['平日'] + stats['假日']
     stats['總點數'] = stats['平日'] * 1 + stats['假日'] * 2
     return stats[['總班數', '總點數', '平日', '假日']].sort_values(by='總點數', ascending=False)
 
-def get_html_calendar(df_big, df_small):
+def get_html_calendar(df_big, df_small, custom_holidays):
     cal = calendar.monthcalendar(year, month)
     map_big = {int(r["日期"].split("/")[1]): r["醫師"] for _, r in df_big.iterrows()}
     map_small = {int(r["日期"].split("/")[1]): r["醫師"] for _, r in df_small.iterrows()}
@@ -416,6 +411,7 @@ def get_html_calendar(df_big, df_small):
         .day-num {font-size:12px; color:#666; text-align:right; margin-bottom:5px;}
         .badge {padding:4px 6px; border-radius:6px; font-size:13px; margin-bottom:4px; display:block; font-weight:bold; color: #333; text-shadow: 0 0 2px #fff; border: 1px solid rgba(0,0,0,0.1);}
         .weekend {background-color:#fafafa !important;}
+        .holiday {background-color:#ffebee !important;} /* 紅色背景給國定假日 */
         .shift-label {font-size: 10px; color: #666; margin-right: 3px;}
     </style>
     <table class="cal-table"><thead><tr><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th style="color:red">Sat</th><th style="color:red">Sun</th></tr></thead><tbody>
@@ -423,7 +419,11 @@ def get_html_calendar(df_big, df_small):
     for week in cal:
         html += "<tr>"
         for i, day in enumerate(week):
-            cls = "weekend" if i >= 5 else ""
+            cls = ""
+            if day != 0:
+                if is_holiday(day, custom_holidays):
+                    cls = "holiday" if day in custom_holidays else "weekend"
+            
             if day == 0: html += f'<td class="empty"></td>'
             else:
                 b_doc = map_big.get(day, "")
@@ -452,9 +452,37 @@ def generate_df(solver, shifts, staff, days, name):
         for doc in staff:
             if solver.Value(shifts[(doc, d)]) == 1:
                 w = date(year, month, d).strftime("%a")
-                is_weekend = date(year, month, d).weekday() >= 5
-                res.append({"日期": f"{month}/{d}", "星期": w, "班別": name, "醫師": doc, "類型": "假日" if is_weekend else "平日"})
+                res.append({"日期": f"{month}/{d}", "星期": w, "班別": name, "醫師": doc})
     return pd.DataFrame(res)
+
+# [New] ICS 產生器
+def generate_ics(df_big, df_small, year, month):
+    ics_content = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//CTH//Roster//TW\nCALSCALE:GREGORIAN\nMETHOD:PUBLISH\n"
+    
+    # 合併兩個 Dataframe
+    full_df = pd.concat([df_big, df_small])
+    
+    for _, row in full_df.iterrows():
+        day = int(row['日期'].split('/')[1])
+        shift_type = row['班別']
+        doctor = row['醫師']
+        
+        # 設定時間：產房班 08:00 - 隔日 08:00 (範例)
+        start_date = date(year, month, day)
+        end_date = start_date + timedelta(days=1)
+        
+        dtstart = start_date.strftime("%Y%m%d")
+        dtend = end_date.strftime("%Y%m%d")
+        
+        ics_content += "BEGIN:VEVENT\n"
+        ics_content += f"SUMMARY:值班: {doctor} ({shift_type})\n"
+        ics_content += f"DTSTART;VALUE=DATE:{dtstart}\n"
+        ics_content += f"DTEND;VALUE=DATE:{dtend}\n"
+        ics_content += f"DESCRIPTION:{shift_type}值班\n"
+        ics_content += "END:VEVENT\n"
+        
+    ics_content += "END:VCALENDAR"
+    return ics_content
 
 def generate_excel_calendar_df(df_big, df_small):
     map_big = {int(r["日期"].split("/")[1]): r["醫師"] for _, r in df_big.iterrows()}
@@ -479,12 +507,11 @@ def generate_excel_calendar_df(df_big, df_small):
     return pd.DataFrame(csv_rows)
 
 # ==========================================
-# 7. 主程式執行 (確保按鈕在最外層)
+# 7. 主程式執行
 # ==========================================
 st.markdown("---")
 st.caption(f"目前設定將產生 {num_solutions} 組方案供您選擇")
 
-# 按鈕在這裡 👇
 if st.button("🚀 開始排班", type="primary"):
     
     if not (vs_staff and r_staff and pgy_staff and int_staff):
@@ -495,7 +522,6 @@ if st.button("🚀 開始排班", type="primary"):
         forbidden_big = []
         forbidden_small = []
         
-        # 進度條
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -510,6 +536,7 @@ if st.button("🚀 開始排班", type="primary"):
                 st.session_state.vs_leaves, st.session_state.r_leaves,
                 st.session_state.vs_wishes, st.session_state.vs_nogo, 
                 st.session_state.r_nogo, st.session_state.r_wishes,
+                st.session_state.holidays, # 傳入國定假日
                 forbidden_patterns=forbidden_big
             )
             
@@ -520,6 +547,7 @@ if st.button("🚀 開始排班", type="primary"):
                 st.session_state.pgy_nogo, st.session_state.pgy_wishes, 
                 st.session_state.int_nogo, st.session_state.int_wishes,
                 st.session_state.r_nogo, r_schedule_map, 
+                st.session_state.holidays, # 傳入國定假日
                 forbidden_patterns=forbidden_small
             )
 
@@ -565,20 +593,40 @@ if st.button("🚀 開始排班", type="primary"):
 
                     c1, c2 = st.columns(2)
                     with c1: 
-                        st.markdown("**大班統計**")
-                        st.dataframe(calculate_stats(df_big), use_container_width=True)
+                        st.markdown("### 大班統計")
+                        stats_b = calculate_stats(df_big, st.session_state.holidays)
+                        st.dataframe(stats_b, use_container_width=True)
+                        st.bar_chart(stats_b['總點數']) # 視覺化
+                        
                     with c2: 
-                        st.markdown("**小班統計 (含 R 支援)**")
-                        st.dataframe(calculate_stats(df_small), use_container_width=True)
+                        st.markdown("### 小班統計 (含 R 支援)")
+                        stats_s = calculate_stats(df_small, st.session_state.holidays)
+                        st.dataframe(stats_s, use_container_width=True)
+                        st.bar_chart(stats_s['總點數']) # 視覺化
 
-                    st.markdown(get_html_calendar(df_big, df_small), unsafe_allow_html=True)
+                    st.markdown("### 📅 排班月曆")
+                    st.markdown(get_html_calendar(df_big, df_small, st.session_state.holidays), unsafe_allow_html=True)
                     
-                    excel_df = generate_excel_calendar_df(df_big, df_small)
-                    csv = excel_df.to_csv(index=False, header=False).encode('utf-8-sig')
-                    st.download_button(
-                        label=f"📥 下載 Excel 日曆格式 (CSV)",
-                        data=csv,
-                        file_name=f"roster_solution_{i+1}.csv",
-                        mime="text/csv",
-                        key=f"dl_{i}"
-                    )
+                    # 檔案下載區
+                    col_d1, col_d2 = st.columns(2)
+                    
+                    with col_d1:
+                        excel_df = generate_excel_calendar_df(df_big, df_small)
+                        csv = excel_df.to_csv(index=False, header=False).encode('utf-8-sig')
+                        st.download_button(
+                            label=f"📥 下載 Excel 日曆格式 (CSV)",
+                            data=csv,
+                            file_name=f"roster_solution_{i+1}.csv",
+                            mime="text/csv",
+                            key=f"dl_csv_{i}"
+                        )
+                    
+                    with col_d2:
+                        ics_data = generate_ics(df_big, df_small, year, month)
+                        st.download_button(
+                            label=f"📅 下載手機行事曆 (.ics)",
+                            data=ics_data,
+                            file_name=f"roster_solution_{i+1}.ics",
+                            mime="text/calendar",
+                            key=f"dl_ics_{i}"
+                        )
