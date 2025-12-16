@@ -7,16 +7,17 @@ import json
 import hashlib
 
 # --- 1. Page Configuration ---
-st.set_page_config(page_title="產房/小班 雙軌排班系統 (R救援版)", layout="wide")
+st.set_page_config(page_title="耕莘醫院雙軌排班系統 (v4.5)", layout="wide")
 
-st.title("🏥 婦產科雙軌排班系統 (v4.4 R救援版)")
-st.caption("新功能：若 PGY/Int 點數 > 8，住院醫師 (R) 自動支援 | 嚴格遵守 R 的間隔與意願保護")
+st.title("🏥 耕莘醫院婦產科雙軌排班系統 (v4.5)")
+st.caption("救援機制調整：PGY/Int 點數 > 10 點才啟動 R 支援 | 平日=1點, 假日=2點")
 
 # --- 2. Session State Management ---
 default_state = {
     "year": 2025,
     "month": 12,
-    "vs_list": "柯P(VS), 怪醫(VS)",
+    # Updated Default Names
+    "vs_list": "張醫師(VS), 王醫師(VS)", 
     "r_list": "洋洋(R3), 蹦蹦(R2)",
     "pgy_list": "小明(PGY), 小華(PGY), 小強(PGY)",
     "int_list": "菜鳥A(Int), 菜鳥B(Int)",
@@ -196,7 +197,7 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
     # Objectives
     add_fairness_objective(model, shifts, r_staff, days, obj_terms, weight=2000)
     
-    # Point Limit Weight = 200 (Lower than No-Go)
+    # R Point Limit (Still strict around 8 for Big Shift, but low weight)
     add_point_system_constraint(model, shifts, r_staff, days, obj_terms, sacrifices, limit=8, weight=200)
     add_spacing_preference(model, shifts, r_staff, days, obj_terms, weight=50)
 
@@ -231,7 +232,7 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
     status = solver.Solve(model)
     
     result_pattern = []
-    r_schedule_map = {r: [] for r in r_staff} # To store Big Shift dates for each R
+    r_schedule_map = {r: [] for r in r_staff}
 
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
         for doc in all_staff:
@@ -246,50 +247,46 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
 def solve_small_shift(pgy_staff, int_staff, r_staff, days, 
                       pgy_leaves, int_leaves, 
                       pgy_nogo, pgy_wishes, int_nogo, int_wishes,
-                      r_nogo, r_schedule_map, # New inputs for R support logic
+                      r_nogo, r_schedule_map, 
                       forbidden_patterns=None):
     
     model = cp_model.CpModel()
     
-    # Staff pool now includes R for support
-    # We treat R separately because they have different constraints
     shifts = {}
     obj_terms = []
     sacrifices = []
 
-    # 1. PGY/Intern Variables
+    # 1. Variables
     for doc in pgy_staff + int_staff:
         for d in days:
             shifts[(doc, d)] = model.NewBoolVar(f"s_sml_{doc}_{d}")
 
-    # 2. R Support Variables
     for doc in r_staff:
         for d in days:
             shifts[(doc, d)] = model.NewBoolVar(f"s_sml_Rsupport_{doc}_{d}")
 
     all_small_candidates = pgy_staff + int_staff + r_staff
 
-    # 3. Coverage (Exactly 1 person, can be PGY, Int, or R)
+    # 3. Coverage
     for d in days:
         model.Add(sum(shifts[(doc, d)] for doc in all_small_candidates) == 1)
     
-    # 4. No Back-to-Back (for PGY/Int)
+    # 4. No Back-to-Back (PGY/Int)
     for doc in pgy_staff + int_staff:
         for d in range(1, len(days)):
              model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
 
-    # 5. R Support Constraints (The 3 Golden Rules)
+    # 5. R Support Constraints (Hard)
     for doc in r_staff:
         big_shift_days = r_schedule_map.get(doc, [])
         r_nogo_days = r_nogo.get(doc, [])
         
         for d in days:
-            # Rule 1: No simultaneous shifts
+            # No simultaneous
             if d in big_shift_days:
                 model.Add(shifts[(doc, d)] == 0)
             
-            # Rule 2: No spacing violation (Strict Q3 relative to Big Shift)
-            # Check if d is too close to any Big Shift day (d-2, d-1, d+1, d+2)
+            # Q3 Spacing from Big Shift
             is_too_close = False
             for b_day in big_shift_days:
                 if abs(b_day - d) <= 2: 
@@ -298,15 +295,15 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
             if is_too_close:
                 model.Add(shifts[(doc, d)] == 0)
 
-            # Rule 3: No No-Go violation for support
+            # No No-Go for support
             if d in r_nogo_days:
                 model.Add(shifts[(doc, d)] == 0)
             
-            # Rule 4 (Implicit): R shouldn't work back-to-back Small Shifts either
+            # No back-to-back support
             if d < len(days):
                 model.Add(shifts[(doc, d)] + shifts[(doc, d+1)] <= 1)
 
-    # 6. Absolute Leaves (PGY/Int)
+    # 6. Absolute Leaves
     for doc, dates_off in pgy_leaves.items():
         if doc in pgy_staff:
             for d in dates_off: model.Add(shifts[(doc, d)] == 0)
@@ -317,7 +314,6 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
     # 7. Diversity
     if forbidden_patterns:
         for pattern in forbidden_patterns:
-            # Check variables relevant to the pattern
             relevant = []
             for doc, d in pattern:
                 if (doc, d) in shifts:
@@ -331,7 +327,7 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
 
     W_LIMIT_BREAK = 5000; W_FAIRNESS = 1000; W_NOGO = 5000; W_WISH = 10
     
-    # 8. Intern/PGY Limits
+    # 8. Limits
     for doc in pgy_staff + int_staff:
         is_intern = doc in int_staff
         limit_weight = W_LIMIT_BREAK if is_intern else (W_LIMIT_BREAK / 2)
@@ -357,12 +353,10 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days,
         obj_terms.append(slack_we * -limit_weight)
         sacrifices.append((slack_we, f"{doc} 假日超過 2 班"))
 
-    # 9. Point System (PGY/Int) - High Penalty for exceeding (1000)
-    # We want to encourage R support (cost 100) if PGY points > 8 (cost 1000)
-    add_point_system_constraint(model, shifts, pgy_staff + int_staff, days, obj_terms, sacrifices, limit=8, weight=1000)
+    # 9. Point System Trigger > 10
+    add_point_system_constraint(model, shifts, pgy_staff + int_staff, days, obj_terms, sacrifices, limit=10, weight=1000)
 
-    # 10. R Support Penalty (Cost = 100)
-    # This acts as a soft barrier. R will only be used if other penalties (PGY overload) exceed 100.
+    # 10. R Support Penalty
     for doc in r_staff:
         for d in days:
             obj_terms.append(shifts[(doc, d)] * -100)
@@ -481,97 +475,3 @@ def generate_excel_calendar_df(df_big, df_small):
             else:
                 row_date.append(f"{month}/{day}")
                 row_big.append(f"[產] {map_big.get(day, '')}")
-                row_small.append(f"[小] {map_small.get(day, '')}")
-        csv_rows.append(row_date); csv_rows.append(row_big); csv_rows.append(row_small)
-        csv_rows.append([""] * 7)
-        
-    return pd.DataFrame(csv_rows)
-
-# --- 7. Main Execution ---
-st.markdown("---")
-st.caption("系統將產生 N 組不同的方案供您選擇")
-
-if st.button(f"🚀 開始排班 (生成 {num_solutions} 組方案)", type="primary"):
-    if not (vs_staff and r_staff and pgy_staff and int_staff):
-        st.error("錯誤：醫師名單不能為空！")
-    else:
-        big_solutions = []
-        small_solutions = []
-        forbidden_big = []
-        forbidden_small = []
-        progress = st.empty()
-        
-        for i in range(num_solutions):
-            progress.text(f"運算中... ({i+1}/{num_solutions})")
-            
-            # 1. Solve Big Shift
-            b_sol, b_stat, b_shifts, b_sac, b_pat, r_schedule_map = solve_big_shift(
-                vs_staff, r_staff, dates, 
-                st.session_state.vs_leaves, st.session_state.r_leaves,
-                st.session_state.vs_wishes, st.session_state.vs_nogo, 
-                st.session_state.r_nogo, st.session_state.r_wishes,
-                forbidden_patterns=forbidden_big
-            )
-            
-            # 2. Solve Small Shift (With R Support Logic)
-            s_sol, s_stat, s_shifts, s_sac, s_pat = solve_small_shift(
-                pgy_staff, int_staff, r_staff, dates, 
-                st.session_state.pgy_leaves, st.session_state.int_leaves,
-                st.session_state.pgy_nogo, st.session_state.pgy_wishes, 
-                st.session_state.int_nogo, st.session_state.int_wishes,
-                st.session_state.r_nogo, r_schedule_map, # Pass R info
-                forbidden_patterns=forbidden_small
-            )
-
-            if b_stat in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-                big_solutions.append((b_sol, b_shifts, b_sac))
-                forbidden_big.append(b_pat)
-            
-            if s_stat in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-                small_solutions.append((s_sol, s_shifts, s_sac))
-                forbidden_small.append(s_pat)
-
-        progress.empty()
-        
-        if not big_solutions or not small_solutions:
-            st.error("無法找出可行解！")
-        else:
-            st.success(f"成功生成 {min(len(big_solutions), len(small_solutions))} 組方案！")
-            tabs = st.tabs([f"方案 {i+1}" for i in range(min(len(big_solutions), len(small_solutions)))])
-            
-            for i, tab in enumerate(tabs):
-                with tab:
-                    b_data = big_solutions[i]
-                    s_data = small_solutions[i]
-                    
-                    df_big = generate_df(b_data[0], b_data[1], vs_staff+r_staff, dates, "大班")
-                    # Small shift includes R support now
-                    df_small = generate_df(s_data[0], s_data[1], pgy_staff+int_staff+r_staff, dates, "小班")
-                    
-                    sac_big = get_report(b_data[0], b_data[2])
-                    sac_small = get_report(s_data[0], s_data[2])
-                    
-                    if sac_big or sac_small:
-                        with st.expander("⚠️ 犧牲報告 (點數超標/違反意願/R支援)", expanded=True):
-                            if sac_big: 
-                                st.write("**[大班 (產房)]**")
-                                for s in sac_big: st.write(f"- 🔴 {s}")
-                            if sac_small: 
-                                st.write("**[小班 (一般)]**")
-                                for s in sac_small: st.write(f"- 🔵 {s}")
-                    else:
-                        st.info("✨ 完美方案 (無犧牲)")
-
-                    c1, c2 = st.columns(2)
-                    with c1: 
-                        st.markdown("**大班統計**")
-                        st.dataframe(calculate_stats(df_big), use_container_width=True)
-                    with c2: 
-                        st.markdown("**小班統計 (含 R 支援)**")
-                        st.dataframe(calculate_stats(df_small), use_container_width=True)
-
-                    st.markdown(get_html_calendar(df_big, df_small), unsafe_allow_html=True)
-                    
-                    excel_df = generate_excel_calendar_df(df_big, df_small)
-                    csv = excel_df.to_csv(index=False, header=False).encode('utf-8-sig')
-                    st.download_button(f"📥 下載 Excel 日曆格式 (CSV)", csv, f"roster_cal_{i+1}.csv", "text/csv", key=f"dl_{i}")
