@@ -39,6 +39,8 @@ graph TD
     SmallSolver -->|Final Solution| Visualizer[Viz & Export Engine]
     Visualizer --> MagicLink[Magic Link Generator]
     Visualizer --> Excel[Excel/ICS Export]
+```
+
 #### 2. Mathematical Model
 
 The solver maximizes an objective function $J$ based on a strict hierarchy of penalties:
