@@ -7,10 +7,13 @@ import json
 import hashlib
 import base64
 import urllib.parse
+import zipfile
+import io
 
 # ==========================================
-# 0. 共用函式 (定義在最上方以便雙模式調用)
+# 0. 基礎設定與共用函式 (定義在最上方)
 # ==========================================
+st.set_page_config(page_title="耕莘醫院雙軌排班系統 (v6.1)", layout="wide")
 
 def get_doctor_color(name):
     palette = ["#FFB3BA", "#FFDFBA", "#FFFFBA", "#BAFFC9", "#BAE1FF", "#E6B3FF", "#FFB3E6", "#C9C9FF", "#FFD1DC", "#E0F7FA", "#F0F4C3", "#D7CCC8", "#F8BBD0", "#C5CAE9", "#B2DFDB"]
@@ -18,9 +21,7 @@ def get_doctor_color(name):
     return palette[idx]
 
 def generate_ics_content(schedule_data, year, month):
-    """
-    schedule_data: list of {'d': day, 't': shift_type}
-    """
+    """用於生成 .ics 檔案內容"""
     ics = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//CTH//Roster//TW\nCALSCALE:GREGORIAN\n"
     for item in schedule_data:
         day = item['d']
@@ -29,24 +30,17 @@ def generate_ics_content(schedule_data, year, month):
         end_date = start_date + timedelta(days=1)
         dtstart = start_date.strftime("%Y%m%d")
         dtend = end_date.strftime("%Y%m%d")
-        # 產生事件
         ics += f"BEGIN:VEVENT\nSUMMARY:值班: {shift_type}\nDTSTART;VALUE=DATE:{dtstart}\nDTEND;VALUE=DATE:{dtend}\nDESCRIPTION:耕莘醫院 {shift_type}值班\nEND:VEVENT\n"
     ics += "END:VCALENDAR"
     return ics
 
 # ==========================================
-# 1. 頁面模式判斷 (醫師檢視模式 vs 總醫師管理模式)
+# 1. 路由判斷 (醫師檢視 vs 總醫師管理)
 # ==========================================
-st.set_page_config(page_title="耕莘醫院雙軌排班系統", layout="wide")
-
-# 檢查網址參數
 query_params = st.query_params
 if "payload" in query_params:
-    # ---------------------------
-    # [模式 A] 醫師個人下載頁面
-    # ---------------------------
+    # --- [模式 A] 醫師個人檢視模式 ---
     try:
-        # 1. 解碼資料
         payload = query_params["payload"]
         json_str = base64.b64decode(payload).decode('utf-8')
         data = json.loads(json_str)
@@ -56,18 +50,15 @@ if "payload" in query_params:
         month = data['m']
         shifts = data['s'] # list of {'d': day, 't': type}
 
-        # 2. 顯示個人頁面
         st.title(f"👋 您好，{doc_name}")
         st.info(f"這是您 {year} 年 {month} 月的專屬值班表")
         
-        # 顯示簡單表格
         df_show = pd.DataFrame(shifts)
         if not df_show.empty:
             df_show['日期'] = df_show['d'].apply(lambda x: f"{month}/{x}")
             df_show['班別'] = df_show['t']
             st.table(df_show[['日期', '班別']])
             
-            # 3. 下載按鈕
             ics_content = generate_ics_content(shifts, year, month)
             st.download_button(
                 label="📅 加入手機行事曆 (下載 .ics)",
@@ -77,28 +68,23 @@ if "payload" in query_params:
                 type="primary",
                 use_container_width=True
             )
-            st.success("💡 下載後請直接開啟檔案，即可匯入行事曆。")
+            st.success("💡 說明：下載後請直接開啟檔案，即可將班表匯入手機行事曆。")
         else:
-            st.success("🎉 這個月沒有值班！好好休息！")
+            st.success("🎉 這個月沒有值班！")
 
     except Exception as e:
         st.error("連結無效或已過期。")
-        st.error(f"Debug: {e}")
     
-    # 停止執行後續程式碼 (只顯示下載頁)
-    st.stop()
+    st.stop() # 停止執行後續程式碼，只顯示個人頁面
 
+# ==========================================
+# [模式 B] 總醫師管理模式 (Admin View)
+# ==========================================
 
-# ---------------------------
-# [模式 B] 總醫師管理介面 (原本的程式碼)
-# ---------------------------
+st.title("🏥 耕莘醫院婦產科雙軌排班系統 (v6.1)")
+st.caption("修復版：確保按鈕顯示 | 功能：魔術連結分發 + 點數制 + R救援")
 
-st.title("🏥 耕莘醫院婦產科雙軌排班系統 (v6.0 分發連結版)")
-st.caption("新增功能：生成每位醫師的專屬下載連結 | 請先複製網址列的 Base URL")
-
-# ... (以下是原本的 Session State, 側邊欄, 演算法, 全部保留) ...
-
-# 2. Session State 初始化
+# --- Session State 初始化 ---
 default_state = {
     "year": 2025,
     "month": 12,
@@ -118,7 +104,7 @@ for key, val in default_state.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
-# 3. 側邊欄設定
+# --- 側邊欄設定 ---
 st.sidebar.header("📂 設定檔存取")
 def get_current_config():
     return {k: st.session_state[k] for k in default_state.keys()}
@@ -145,9 +131,9 @@ days_in_month = calendar.monthrange(year, month)[1]
 dates = [d for d in range(1, days_in_month + 1)]
 
 st.sidebar.markdown("---")
-st.sidebar.header("🏮 國定假日 (紅字)")
+st.sidebar.header("🏮 國定假日")
 holidays = st.sidebar.multiselect(
-    "請勾選平日放假的日子 (視為假日班)",
+    "請勾選平日放假的日子",
     options=dates,
     default=st.session_state.get("holidays", []),
     key="holidays_widget"
@@ -157,8 +143,9 @@ st.session_state["holidays"] = holidays
 st.sidebar.markdown("---")
 st.sidebar.header("🔢 運算設定")
 num_solutions = st.sidebar.slider("產生方案數量", min_value=1, max_value=5, value=1)
+base_app_url = st.sidebar.text_input("🔗 App 網址 (用於連結)", value="https://doctor-scheduler.streamlit.app")
 
-# 4. 主畫面：人員與限制設定
+# --- 主畫面 UI ---
 st.subheader("1. 人員與限制設定")
 tab1, tab2 = st.tabs(["🔴 大班 (產房)", "🔵 小班 (一般)"])
 with tab1:
@@ -194,24 +181,23 @@ st.markdown("#### 排班意願 (軟限制)")
 c1, c2 = st.columns(2)
 with c1:
     with st.expander("🔴 大班意願", expanded=False):
-        update_pref("vs_wishes", vs_staff, "VS 指定值班", "優先排入")
-        update_pref("vs_nogo", vs_staff, "VS 不想值", "盡量避開")
+        update_pref("vs_wishes", vs_staff, "VS 指定值班", "優先")
+        update_pref("vs_nogo", vs_staff, "VS 不想值", "避開")
         st.markdown("---")
-        update_pref("r_nogo", r_staff, "R 不想值", "盡量避開")
-        update_pref("r_wishes", r_staff, "R 想值", "額外加分")
+        update_pref("r_nogo", r_staff, "R 不想值", "避開")
+        update_pref("r_wishes", r_staff, "R 想值", "加分")
 with c2:
     with st.expander("🔵 小班意願", expanded=False):
-        update_pref("pgy_nogo", pgy_staff, "PGY 不想值", "盡量避開")
-        update_pref("pgy_wishes", pgy_staff, "PGY 想值", "額外加分")
+        update_pref("pgy_nogo", pgy_staff, "PGY 不想值", "避開")
+        update_pref("pgy_wishes", pgy_staff, "PGY 想值", "加分")
         st.markdown("---")
-        update_pref("int_nogo", int_staff, "Int 不想值", "盡量避開")
-        update_pref("int_wishes", int_staff, "Int 想值", "額外加分")
+        update_pref("int_nogo", int_staff, "Int 不想值", "避開")
+        update_pref("int_wishes", int_staff, "Int 想值", "加分")
 
-# 5. 核心演算法 (保持 v4.8 的權重與邏輯)
+# --- 演算法與輔助函式定義區 (全部收攏在此) ---
+
 def is_holiday(d, custom_holidays):
-    is_weekend = date(year, month, d).weekday() >= 5
-    is_custom = d in custom_holidays
-    return is_weekend or is_custom
+    return (date(year, month, d).weekday() >= 5) or (d in custom_holidays)
 
 def add_fairness_objective(model, shifts, staff_list, days, custom_holidays, obj_terms, weight=500):
     if not staff_list: return
@@ -249,6 +235,83 @@ def add_spacing_preference(model, shifts, staff_list, days, obj_terms, weight=10
             model.Add(shifts[(doc, d)] + shifts[(doc, d+2)] <= 1 + q2_violation)
             obj_terms.append(q2_violation * -weight)
 
+def calculate_stats(df, custom_holidays):
+    if df.empty: return pd.DataFrame()
+    df['Type'] = df['日期'].apply(lambda x: '假日' if is_holiday(int(x.split('/')[1]), custom_holidays) else '平日')
+    stats = df.groupby('醫師')['Type'].value_counts().unstack(fill_value=0)
+    if '平日' not in stats.columns: stats['平日'] = 0
+    if '假日' not in stats.columns: stats['假日'] = 0
+    stats['總班數'] = stats['平日'] + stats['假日']
+    stats['總點數'] = stats['平日'] * 1 + stats['假日'] * 2
+    return stats[['總班數', '總點數', '平日', '假日']].sort_values(by='總點數', ascending=False)
+
+def get_html_calendar(df_big, df_small, custom_holidays):
+    cal = calendar.monthcalendar(year, month)
+    map_big = {int(r["日期"].split("/")[1]): r["醫師"] for _, r in df_big.iterrows()}
+    map_small = {int(r["日期"].split("/")[1]): r["醫師"] for _, r in df_small.iterrows()}
+    html = """<style>.cal-table {width:100%; border-collapse:collapse; table-layout:fixed;}.cal-table td {height:120px; border:1px solid #ddd; vertical-align:top; padding:4px; background:#fff;}.cal-table th {background:#f0f2f6; border:1px solid #ddd; padding:5px;}.day-num {font-size:12px; color:#666; text-align:right; margin-bottom:5px;}.badge {padding:4px 6px; border-radius:6px; font-size:13px; margin-bottom:4px; display:block; font-weight:bold; color: #333; text-shadow: 0 0 2px #fff; border: 1px solid rgba(0,0,0,0.1);}.weekend {background-color:#fafafa !important;}.holiday {background-color:#ffebee !important;}.shift-label {font-size: 10px; color: #666; margin-right: 3px;}</style><table class="cal-table"><thead><tr><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th style="color:red">Sat</th><th style="color:red">Sun</th></tr></thead><tbody>"""
+    for week in cal:
+        html += "<tr>"
+        for i, day in enumerate(week):
+            cls = ""
+            if day != 0:
+                if is_holiday(day, custom_holidays): cls = "holiday" if day in custom_holidays else "weekend"
+            if day == 0: html += f'<td class="empty"></td>'
+            else:
+                b_doc = map_big.get(day, ""); s_doc = map_small.get(day, "")
+                html += f'<td class="{cls}"><div class="day-num">{day}</div>'
+                if b_doc: html += f'<div class="badge" style="background-color:{get_doctor_color(b_doc)};"><span class="shift-label">產:</span>{b_doc}</div>'
+                if s_doc: html += f'<div class="badge" style="background-color:{get_doctor_color(s_doc)};"><span class="shift-label">小:</span>{s_doc}</div>'
+                html += "</td>"
+        html += "</tr>"
+    html += "</tbody></table>"
+    return html
+
+def get_report(solver, sacrifices):
+    report = []
+    seen = set()
+    for var, msg in sacrifices:
+        if solver.Value(var) > 0:
+            if msg not in seen: report.append(msg); seen.add(msg)
+    return report
+
+def generate_df(solver, shifts, staff, days, name):
+    res = []
+    for d in days:
+        for doc in staff:
+            if solver.Value(shifts[(doc, d)]) == 1:
+                w = date(year, month, d).strftime("%a")
+                res.append({"日期": f"{month}/{d}", "星期": w, "班別": name, "醫師": doc})
+    return pd.DataFrame(res)
+
+def generate_excel_calendar_df(df_big, df_small):
+    map_big = {int(r["日期"].split("/")[1]): r["醫師"] for _, r in df_big.iterrows()}
+    map_small = {int(r["日期"].split("/")[1]): r["醫師"] for _, r in df_small.iterrows()}
+    cal = calendar.monthcalendar(year, month)
+    csv_rows = []
+    headers = ['週一', '週二', '週三', '週四', '週五', '週六', '週日']
+    csv_rows.append(headers)
+    for week in cal:
+        row_date = []; row_big = []; row_small = []
+        for day in week:
+            if day == 0: row_date.append(""); row_big.append(""); row_small.append("")
+            else: row_date.append(f"{month}/{day}"); row_big.append(f"[產] {map_big.get(day, '')}"); row_small.append(f"[小] {map_small.get(day, '')}")
+        csv_rows.append(row_date); csv_rows.append(row_big); csv_rows.append(row_small); csv_rows.append([""] * 7)
+    return pd.DataFrame(csv_rows)
+
+def generate_magic_link(base_url, doctor_name, df_big, df_small, year, month):
+    full_df = pd.concat([df_big, df_small])
+    doc_shifts = full_df[full_df['醫師'] == doctor_name]
+    shift_data = []
+    for _, row in doc_shifts.iterrows():
+        day = int(row['日期'].split('/')[1])
+        shift_data.append({'d': day, 't': row['班別']})
+    payload = {'n': doctor_name, 'y': year, 'm': month, 's': shift_data}
+    json_str = json.dumps(payload)
+    b64_str = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+    if base_url.endswith('/'): base_url = base_url[:-1]
+    return f"{base_url}/?payload={b64_str}"
+
 def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_nogo, r_nogo, r_wishes, custom_holidays, forbidden_patterns=None):
     model = cp_model.CpModel()
     all_staff = vs_staff + r_staff
@@ -271,11 +334,9 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
     for doc, dates_on in vs_wishes.items():
         if doc in vs_staff:
             for d in dates_on: model.Add(shifts[(doc, d)] == 1) 
-    
     add_fairness_objective(model, shifts, r_staff, days, custom_holidays, obj_terms, weight=2000)
     add_point_system_constraint(model, shifts, r_staff, days, custom_holidays, obj_terms, sacrifices, limit=8, weight=200)
     add_spacing_preference(model, shifts, r_staff, days, obj_terms, weight=50)
-
     for doc, dates_off in r_nogo.items():
         if doc in r_staff:
             for d in dates_off: obj_terms.append(shifts[(doc, d)] * -5000); sacrifices.append((shifts[(doc, d)], f"{doc} (R) 排入 No-Go ({month}/{d})"))
@@ -285,11 +346,10 @@ def solve_big_shift(vs_staff, r_staff, days, vs_leaves, r_leaves, vs_wishes, vs_
     for doc in vs_staff:
         wished_days = vs_wishes.get(doc, [])
         for d in days:
-            if d not in wished_days: obj_terms.append(shifts[(doc, d)] * -5000); sacrifices.append((shifts[(doc, d)], f"{doc} (VS) 支援非指定班 ({month}/{d})"))
+            if d not in wished_days: obj_terms.append(shifts[(doc, d)] * -5000); sacrifices.append((shifts[(doc, d)], f"{doc} (VS) 支援 ({month}/{d})"))
     for doc, dates_on in r_wishes.items():
         if doc in r_staff:
             for d in dates_on: obj_terms.append(shifts[(doc, d)] * 10)
-
     model.Maximize(sum(obj_terms))
     solver = cp_model.CpSolver()
     solver.parameters.random_seed = len(forbidden_patterns) if forbidden_patterns else 0
@@ -340,12 +400,10 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days, pgy_leaves, int_leave
             for doc, d in pattern:
                 if (doc, d) in shifts: relevant.append(shifts[(doc, d)])
             if relevant: model.Add(sum(relevant) <= len(relevant) - 3)
-
     weekend_days = [d for d in days if is_holiday(d, custom_holidays)]
     weekday_days = [d for d in days if not is_holiday(d, custom_holidays)]
     month_weeks = calendar.monthcalendar(year, month)
     W_LIMIT_BREAK = 1000000; W_FAIRNESS = 500; W_NOGO = 5000; W_WISH = 10
-    
     for doc in pgy_staff + int_staff:
         limit_weight = W_LIMIT_BREAK
         for week in month_weeks:
@@ -363,7 +421,6 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days, pgy_leaves, int_leave
         slack_we = model.NewIntVar(0, 31, f"slk_we_{doc}")
         model.Add(we_cnt <= 2 + slack_we)
         obj_terms.append(slack_we * -limit_weight); sacrifices.append((slack_we, f"{doc} 假日超過 2 班"))
-
     add_point_system_constraint(model, shifts, pgy_staff + int_staff, days, custom_holidays, obj_terms, sacrifices, limit=10, weight=1000)
     for doc in r_staff:
         for d in days: obj_terms.append(shifts[(doc, d)] * -50000); sacrifices.append((shifts[(doc, d)], f"{doc} (R) 支援小班 ({month}/{d})"))
@@ -374,3 +431,106 @@ def solve_small_shift(pgy_staff, int_staff, r_staff, days, pgy_leaves, int_leave
         for d in days:
             if d in nogo_list: obj_terms.append(shifts[(doc, d)] * -W_NOGO); sacrifices.append((shifts[(doc, d)], f"{doc} 排入不想值的班 ({month}/{d})"))
             if d in wish_list: obj_terms.append(shifts[(doc, d)] * W_WISH)
+    model.Maximize(sum(obj_terms))
+    solver = cp_model.CpSolver()
+    solver.parameters.random_seed = len(forbidden_patterns) if forbidden_patterns else 0
+    status = solver.Solve(model)
+    result_pattern = []
+    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        for doc in all_small_candidates:
+            for d in days:
+                if solver.Value(shifts[(doc, d)]) == 1: result_pattern.append((doc, d))
+    return solver, status, shifts, sacrifices, result_pattern
+
+# ==========================================
+# 8. 主執行區塊 (按鈕保證顯示)
+# ==========================================
+st.markdown("---")
+st.caption(f"系統將產生 {num_solutions} 組方案。")
+
+# 注意：此處無縮排，位於檔案最外層
+if st.button("🚀 開始排班", type="primary"):
+    
+    if not (vs_staff and r_staff and pgy_staff and int_staff):
+        st.error("錯誤：醫師名單不能為空！")
+    else:
+        big_solutions = []
+        small_solutions = []
+        forbidden_big = []
+        forbidden_small = []
+        progress = st.empty()
+        
+        for i in range(num_solutions):
+            progress.text(f"運算中... ({i+1}/{num_solutions})")
+            
+            b_sol, b_stat, b_shifts, b_sac, b_pat, r_schedule_map = solve_big_shift(
+                vs_staff, r_staff, dates, 
+                st.session_state.vs_leaves, st.session_state.r_leaves,
+                st.session_state.vs_wishes, st.session_state.vs_nogo, 
+                st.session_state.r_nogo, st.session_state.r_wishes,
+                st.session_state.holidays, forbidden_patterns=forbidden_big
+            )
+            
+            s_sol, s_stat, s_shifts, s_sac, s_pat = solve_small_shift(
+                pgy_staff, int_staff, r_staff, dates, 
+                st.session_state.pgy_leaves, st.session_state.int_leaves,
+                st.session_state.pgy_nogo, st.session_state.pgy_wishes, 
+                st.session_state.int_nogo, st.session_state.int_wishes,
+                st.session_state.r_nogo, r_schedule_map, 
+                st.session_state.holidays, forbidden_patterns=forbidden_small
+            )
+
+            if b_stat in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+                big_solutions.append((b_sol, b_shifts, b_sac))
+                forbidden_big.append(b_pat)
+            
+            if s_stat in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+                small_solutions.append((s_sol, s_shifts, s_sac))
+                forbidden_small.append(s_pat)
+
+        progress.empty()
+        
+        if not big_solutions or not small_solutions:
+            st.error("無法找出可行解！請嘗試減少「絕對請假」的日期。")
+        else:
+            st.success(f"成功生成 {min(len(big_solutions), len(small_solutions))} 組方案！")
+            tabs = st.tabs([f"方案 {i+1}" for i in range(min(len(big_solutions), len(small_solutions)))])
+            
+            for i, tab in enumerate(tabs):
+                with tab:
+                    b_data = big_solutions[i]
+                    s_data = small_solutions[i]
+                    
+                    df_big = generate_df(b_data[0], b_data[1], vs_staff+r_staff, dates, "大班")
+                    df_small = generate_df(s_data[0], s_data[1], pgy_staff+int_staff+r_staff, dates, "小班")
+                    sac_big = get_report(b_data[0], b_data[2])
+                    sac_small = get_report(s_data[0], s_data[2])
+                    
+                    if sac_big or sac_small:
+                        with st.expander("⚠️ 犧牲報告", expanded=True):
+                            if sac_big: st.write("**[大班]**"); [st.write(f"- 🔴 {s}") for s in sac_big]
+                            if sac_small: st.write("**[小班]**"); [st.write(f"- 🔵 {s}") for s in sac_small]
+                    else:
+                        st.info("✨ 完美方案")
+
+                    c1, c2 = st.columns(2)
+                    with c1: 
+                        st.markdown("### 大班統計")
+                        st.dataframe(calculate_stats(df_big, st.session_state.holidays), use_container_width=True)
+                    with c2: 
+                        st.markdown("### 小班統計")
+                        st.dataframe(calculate_stats(df_small, st.session_state.holidays), use_container_width=True)
+
+                    st.markdown(get_html_calendar(df_big, df_small, st.session_state.holidays), unsafe_allow_html=True)
+                    
+                    # 連結分發區
+                    st.markdown("#### 🔗 分發連結")
+                    all_docs = pd.concat([df_big['醫師'], df_small['醫師']]).unique()
+                    with st.expander("點擊展開所有醫師連結"):
+                        for doc in all_docs:
+                            link = generate_magic_link(base_app_url, doc, df_big, df_small, year, month)
+                            st.text_input(f"{doc}", value=link, key=f"link_{i}_{doc}")
+
+                    excel_df = generate_excel_calendar_df(df_big, df_small)
+                    csv = excel_df.to_csv(index=False, header=False).encode('utf-8-sig')
+                    st.download_button(f"📥 下載 Excel 日曆格式 (CSV)", csv, f"roster_solution_{i+1}.csv", "text/csv", key=f"dl_{i}")
